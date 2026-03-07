@@ -152,6 +152,93 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // GET /api/calendar?date=YYYY-MM-DD  — server-side FF fetch + AI fallback
+  if (req.method === "GET" && url === "/api/calendar") {
+    const qs   = new URL(req.url, "http://x").searchParams;
+    const date = qs.get("date");
+    if (!date) return json(res, 400, { error: "date param required" });
+
+    const https = require("https");
+    const fetchUrl = (u) => new Promise((resolve, reject) => {
+      const r = https.get(u, { headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }, timeout: 6000 }, (resp) => {
+        let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d));
+      });
+      r.on("error", reject);
+      r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+    });
+
+    const normalise = (arr) => arr.map(e => ({
+      date: e.date || "", currency: e.country || e.currency || "",
+      name: e.title || e.name || "", impact: (e.impact || "").toLowerCase(),
+      actual:   (e.actual   != null && e.actual   !== "") ? e.actual   : null,
+      forecast: (e.forecast != null && e.forecast !== "") ? e.forecast : null,
+      previous: (e.previous != null && e.previous !== "") ? e.previous : null,
+    }));
+
+    const filterDay = (arr, ds) => arr.filter(e => {
+      if (!e.date) return false;
+      const d = new Date(e.date);
+      const loc = d.getFullYear() + "-" + String(d.getMonth()+1).padStart(2,"0") + "-" + String(d.getDate()).padStart(2,"0");
+      return loc === ds;
+    }).sort((a, b) => new Date(a.date) - new Date(b.date));
+
+    // 1. Try FF CDN feeds
+    const ffUrls = [
+      "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
+      "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+      "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json",
+      "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
+    ];
+    for (const u of ffUrls) {
+      try {
+        const txt = await fetchUrl(u);
+        if (txt.includes("DOCTYPE") || txt.includes("Request Denied")) continue;
+        const arr = JSON.parse(txt);
+        if (!Array.isArray(arr) || !arr.length) continue;
+        const hits = filterDay(normalise(arr), date);
+        if (hits.length > 0) {
+          console.log(`[CAL] FF hit ${hits.length} events for ${date}`);
+          return json(res, 200, { events: hits, source: "forexfactory" });
+        }
+      } catch(e) { console.warn("[CAL] FF failed:", e.message); }
+    }
+
+    // 2. Fallback: Claude AI
+    try {
+      const d = new Date(date + "T12:00:00");
+      const dayName = d.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+      const prompt = "List all major forex economic calendar events for " + dayName + ".\nReturn ONLY a JSON array. Each object must have: time (HH:MM EST), currency (3-letter code), name, impact (high/medium/low), forecast (string or null), previous (string or null). Include all impact levels. No extra text, only the JSON array.";
+
+      const body = JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, messages: [{ role: "user", content: prompt }] });
+      const apiKey = process.env.ANTHROPIC_API_KEY || "";
+
+      const aiTxt = await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) }
+        }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
+        r.on("error", reject); r.write(body); r.end();
+      });
+
+      const aiData = JSON.parse(aiTxt);
+      const txt = (aiData.content && aiData.content[0]) ? aiData.content[0].text : "";
+      const match = txt.match(/\[[\s\S]*\]/);
+      if (match) {
+        const arr = JSON.parse(match[0]);
+        const events = arr.map(e => ({
+          date: date + "T" + (e.time || "00:00") + ":00",
+          currency: e.currency || "", name: e.name || "",
+          impact: (e.impact || "medium").toLowerCase(),
+          actual: null, forecast: e.forecast || null, previous: e.previous || null, source: "AI"
+        }));
+        console.log(`[CAL] AI generated ${events.length} events for ${date}`);
+        return json(res, 200, { events, source: "AI" });
+      }
+    } catch(e) { console.warn("[CAL] AI failed:", e.message); }
+
+    return json(res, 200, { events: [], source: "none" });
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
