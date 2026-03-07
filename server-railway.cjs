@@ -87,7 +87,7 @@ function cleanTrade(trade) {
 }
 
 // ─── HTTP Server ──────────────────────────────────────────────────────────────
-const server = http.createServer((req, res) => {
+const server = http.createServer(async (req, res) => {
   setCORS(res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
