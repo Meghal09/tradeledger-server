@@ -239,6 +239,61 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { events: [], source: "none" });
   }
 
+
+  // POST /api/briefing  — AI market briefing from news articles
+  if (req.method === "POST" && url === "/api/briefing") {
+    try {
+      const body = await new Promise((resolve, reject) => {
+        let d = "";
+        req.on("data", c => d += c);
+        req.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
+        req.on("error", reject);
+      });
+
+      const articles = (body.articles || []).slice(0, 15);
+      if (!articles.length) return json(res, 400, { error: "No articles provided" });
+
+      const now = new Date().toLocaleString("en-US", { weekday: "short", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC";
+      const src = articles[0]?.source || "news feed";
+      const digest = articles.map((a, i) => {
+        const d = a.pubDate ? new Date(a.pubDate) : null;
+        const timeTag = d ? d.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) : "";
+        const body2 = a.description && a.description.length > 20 ? a.title + " — " + a.description.slice(0, 150) : a.title;
+        return (i + 1) + ". [" + timeTag + "] " + body2;
+      }).join("\n");
+
+      const prompt = "You are a forex market analyst. It is " + now + ". Summarise these " + articles.length + " headlines from " + src + " in 3-4 sentences: what is happening, which currencies/pairs are affected, and the near-term directional bias. Be factual and concise — only reference what is in the headlines.\n\nHeadlines:\n" + digest;
+
+      const reqBody = JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 350, messages: [{ role: "user", content: prompt }] });
+      const apiKey = process.env.ANTHROPIC_API_KEY || "";
+
+      const https = require("https");
+      const aiTxt = await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01",
+            "Content-Length": Buffer.byteLength(reqBody)
+          }
+        }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
+        r.on("error", reject);
+        r.write(reqBody);
+        r.end();
+      });
+
+      const aiData = JSON.parse(aiTxt);
+      if (aiData.error) return json(res, 500, { error: aiData.error.message });
+      const text = aiData.content && aiData.content[0] ? aiData.content[0].text : "";
+      if (!text) return json(res, 500, { error: "Empty AI response" });
+      return json(res, 200, { briefing: text, generatedAt: new Date().toISOString() });
+    } catch(e) {
+      console.warn("[BRIEFING] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
