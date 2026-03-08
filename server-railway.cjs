@@ -899,16 +899,16 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // GET /api/predictions?symbols=XAUUSD,BTCUSD,...  — AI predictions for watchlist symbols
+  // GET /api/predictions?symbols=XAUUSD,BTCUSD,...  — AI predictions anchored to live prices
   if (req.method === "GET" && url.startsWith("/api/predictions")) {
     try {
       const qs = new URLSearchParams(fullUrl.split("?")[1]||"");
       const rawSyms = (qs.get("symbols")||"XAUUSD,BTCUSD").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean).slice(0,4);
 
-      // Cache key based on symbols (sorted) — regenerate every 4 hours
+      // Cache: 1 hour (short — prices move)
       if (!global._predCache) global._predCache = {};
       const cacheKey = rawSyms.slice().sort().join(",");
-      const CACHE_TTL = 4 * 60 * 60 * 1000;
+      const CACHE_TTL = 60 * 60 * 1000; // 1 hour
       const cached = global._predCache[cacheKey];
       if (cached && (Date.now() - cached.ts) < CACHE_TTL) {
         console.log("[PRED] Cache hit for", cacheKey);
@@ -922,51 +922,95 @@ const server = http.createServer(async (req, res) => {
       const now = new Date();
       const dateStr = now.toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric", year:"numeric" });
 
-      // Build a concise asset description for each symbol
+      // ── STEP 1: Fetch real live prices for all requested symbols ─────────
       const ASSET_META = {
-        XAUUSD:{name:"Gold",type:"commodity",note:"priced per troy oz in USD"},
-        XAGUSD:{name:"Silver",type:"commodity",note:"priced per troy oz in USD"},
-        BTCUSD:{name:"Bitcoin",type:"crypto",note:""},
-        ETHUSD:{name:"Ethereum",type:"crypto",note:""},
-        BNBUSD:{name:"BNB",type:"crypto",note:""},
-        SOLUSD:{name:"Solana",type:"crypto",note:""},
-        EURUSD:{name:"EUR/USD",type:"forex",note:"major pair"},
-        GBPUSD:{name:"GBP/USD",type:"forex",note:"major pair"},
-        USDJPY:{name:"USD/JPY",type:"forex",note:"major pair"},
-        GBPJPY:{name:"GBP/JPY",type:"forex",note:"cross pair"},
-        AUDUSD:{name:"AUD/USD",type:"forex",note:"commodity currency"},
-        USDCHF:{name:"USD/CHF",type:"forex",note:"safe-haven"},
-        USDCAD:{name:"USD/CAD",type:"forex",note:"oil-linked"},
-        NAS100:{name:"Nasdaq 100",type:"index",note:""},
-        SPX500:{name:"S&P 500",type:"index",note:""},
-        US30:{name:"Dow Jones",type:"index",note:""},
-        USOIL:{name:"WTI Crude Oil",type:"commodity",note:"priced per barrel"},
+        XAUUSD:{name:"Gold",type:"commodity",cgId:null,ffBase:"XAU"},
+        XAGUSD:{name:"Silver",type:"commodity",cgId:null,ffBase:"XAG"},
+        BTCUSD:{name:"Bitcoin",type:"crypto",cgId:"bitcoin"},
+        ETHUSD:{name:"Ethereum",type:"crypto",cgId:"ethereum"},
+        BNBUSD:{name:"BNB",type:"crypto",cgId:"binancecoin"},
+        SOLUSD:{name:"Solana",type:"crypto",cgId:"solana"},
+        XRPUSD:{name:"XRP",type:"crypto",cgId:"ripple"},
+        EURUSD:{name:"EUR/USD",type:"forex",ffPair:"EUR"},
+        GBPUSD:{name:"GBP/USD",type:"forex",ffPair:"GBP"},
+        USDJPY:{name:"USD/JPY",type:"forex",ffPair:"JPY",invert:true},
+        GBPJPY:{name:"GBP/JPY",type:"forex"},
+        AUDUSD:{name:"AUD/USD",type:"forex",ffPair:"AUD"},
+        USDCHF:{name:"USD/CHF",type:"forex",ffPair:"CHF",invert:true},
+        USDCAD:{name:"USD/CAD",type:"forex",ffPair:"CAD",invert:true},
+        NZDUSD:{name:"NZD/USD",type:"forex",ffPair:"NZD"},
+        NAS100:{name:"Nasdaq 100",type:"index"},
+        SPX500:{name:"S&P 500",type:"index"},
+        US30:{name:"Dow Jones",type:"index"},
+        USOIL:{name:"WTI Crude Oil",type:"commodity"},
       };
 
-      const symbolList = rawSyms.map(s => {
-        const m = ASSET_META[s] || {name:s, type:"financial instrument"};
-        return `${s} (${m.name}${m.note?", "+m.note:""})`;
-      }).join(", ");
+      const httpsGetSimple = (host, path) => new Promise((resolve, reject) => {
+        const r = https.request({ hostname:host, path, method:"GET", timeout:8000,
+          headers:{"User-Agent":"Mozilla/5.0","Accept":"application/json"}
+        }, resp => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve({status:resp.statusCode,text:d})); });
+        r.on("error", reject);
+        r.on("timeout", ()=>{ r.destroy(); reject(new Error("timeout")); });
+        r.end();
+      });
 
-      const exampleObj = `{
-    "asset": "SYMBOL",
-    "name": "Asset Name",
-    "bias": "bullish|bearish|neutral",
-    "target": <realistic 1-day or 1-week price number>,
-    "support": <key support level number>,
-    "resistance": <key resistance level number>,
-    "confidence": <50-88 integer>,
-    "timeframe": "Today" or "This Week",
-    "catalyst": "<1-sentence reason based on macro/technical context>",
-    "analyst": "<realistic firm name e.g. Goldman Sachs Research, JPMorgan, Citi FX>",
-    "signal": "BUY|SELL|HOLD"
-  }`;
+      const livePrices = {}; // symbol -> {price, change24h, changeP}
 
-      const prompt = "You are a professional market analyst. Today is " + dateStr + ".\n\nGenerate realistic price predictions for these " + rawSyms.length + " instruments: " + symbolList + "\n\nBase your analysis on realistic current market prices, key technical levels, and macro environment (Fed policy, dollar strength, risk sentiment, geopolitical factors).\n\nRespond ONLY with a valid JSON array of exactly " + rawSyms.length + " objects, no markdown, no extra text:\n[\n  " + exampleObj + "\n]\n\nMake prices realistic for each asset type. Gold typically ~$2000-3500/oz, BTC ~$30k-100k, forex pairs use standard pip values.";
+      // Fetch crypto via CoinGecko
+      const cryptoSyms = rawSyms.filter(s=>ASSET_META[s]?.cgId);
+      if (cryptoSyms.length) {
+        try {
+          const ids = cryptoSyms.map(s=>ASSET_META[s].cgId).join(",");
+          const cgResp = await httpsGetSimple("api.coingecko.com", "/api/v3/simple/price?ids="+ids+"&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true");
+          if (cgResp.status===200) {
+            const cgData = JSON.parse(cgResp.text);
+            cryptoSyms.forEach(s=>{
+              const id = ASSET_META[s].cgId;
+              const d = cgData[id];
+              if (d?.usd) livePrices[s] = {price:d.usd, changeP:+(d.usd_24h_change||0).toFixed(2)};
+            });
+            console.log("[PRED] CoinGecko prices:", Object.keys(livePrices));
+          }
+        } catch(e) { console.warn("[PRED] CoinGecko failed:", e.message); }
+      }
+
+      // Fetch metals + forex via Frankfurter (ECB)
+      const metalForexSyms = rawSyms.filter(s=>ASSET_META[s]?.ffBase||ASSET_META[s]?.ffPair);
+      if (metalForexSyms.length) {
+        try {
+          // Collect all currencies needed
+          const currencies = [...new Set(metalForexSyms.map(s=>ASSET_META[s]?.ffBase||ASSET_META[s]?.ffPair).filter(Boolean))];
+          const ffResp = await httpsGetSimple("api.frankfurter.app", "/latest?from=USD&to="+currencies.join(","));
+          if (ffResp.status===200) {
+            const ffData = JSON.parse(ffResp.text);
+            const rates = ffData.rates||{};
+            metalForexSyms.forEach(s=>{
+              const m = ASSET_META[s];
+              const code = m?.ffBase||m?.ffPair;
+              if (!code||!rates[code]) return;
+              const price = m?.invert ? rates[code] : (1/rates[code]);
+              livePrices[s] = {price:+price.toFixed(m?.ffBase?2:5), changeP:0};
+            });
+            console.log("[PRED] Frankfurter prices:", metalForexSyms.filter(s=>livePrices[s]));
+          }
+        } catch(e) { console.warn("[PRED] Frankfurter failed:", e.message); }
+      }
+
+      // ── STEP 2: Build prompt with REAL prices injected ───────────────────
+      const symLines = rawSyms.map(s=>{
+        const m = ASSET_META[s]||{name:s,type:"instrument"};
+        const lp = livePrices[s];
+        const priceStr = lp
+          ? `CURRENT LIVE PRICE: ${lp.price} (24h change: ${lp.changeP>0?"+":""}${lp.changeP}%)`
+          : "current price: unknown — use realistic estimate";
+        return `- ${s} (${m.name}): ${priceStr}`;
+      }).join("\n");
+
+      const prompt = "You are a professional market analyst. Today is " + dateStr + ".\n\nHere are the REAL CURRENT LIVE PRICES as of right now — your predictions MUST use these as the starting point:\n" + symLines + "\n\nGenerate analyst-style predictions for exactly these " + rawSyms.length + " instruments. Your targets, support, and resistance levels MUST be close to the current prices above (not historical levels). For example if BTC is at $67,000 then targets should be in the $60k-$75k range, NOT $40k-$50k range.\n\nRespond ONLY with a valid JSON array of exactly " + rawSyms.length + " objects, no markdown, no extra text:\n[\n  {\n    \"asset\": \"SYMBOL (exact symbol from input)\",\n    \"name\": \"Asset Name\",\n    \"currentPrice\": <the live price number from above>,\n    \"bias\": \"bullish|bearish|neutral\",\n    \"target\": <realistic target NEAR current price, max 3-5% away>,\n    \"support\": <key support BELOW current price>,\n    \"resistance\": <key resistance ABOVE current price>,\n    \"confidence\": <55-85 integer>,\n    \"timeframe\": \"Today\" or \"This Week\",\n    \"catalyst\": \"<1-sentence specific market reason>\",\n    \"analyst\": \"<realistic firm: Goldman Sachs, JPMorgan, Citi, Morgan Stanley, Deutsche Bank, UBS, Barclays>\",\n    \"signal\": \"BUY|SELL|HOLD\"\n  }\n]";
 
       const body = JSON.stringify({
         model: "llama-3.1-8b-instant",
-        max_tokens: 800,
+        max_tokens: 900,
         messages: [{ role: "user", content: prompt }]
       });
 
@@ -982,12 +1026,20 @@ const server = http.createServer(async (req, res) => {
       const aiData = JSON.parse(aiTxt);
       const txt = aiData.choices?.[0]?.message?.content?.trim() || "";
       const match = txt.match(/\[[\s\S]*\]/);
-      if (!match) return json(res, 200, { predictions: [], error: "Parse failed: " + txt.slice(0,100) });
+      if (!match) return json(res, 200, { predictions: [], error: "Parse failed: " + txt.slice(0,120) });
 
-      const predictions = JSON.parse(match[0]);
-      const result = { predictions, generatedAt: now.toISOString(), symbols: rawSyms };
+      let predictions = JSON.parse(match[0]);
+
+      // ── STEP 3: Override currentPrice with actual live data (don't trust AI for this) ─
+      predictions = predictions.map(p => {
+        const live = livePrices[p.asset];
+        if (live) p.currentPrice = live.price;
+        return p;
+      });
+
+      const result = { predictions, generatedAt: now.toISOString(), symbols: rawSyms, livePrices };
       global._predCache[cacheKey] = { ts: Date.now(), data: result };
-      console.log("[PRED] Generated", predictions.length, "predictions for", cacheKey);
+      console.log("[PRED] Generated", predictions.length, "predictions for", cacheKey, "with live prices:", Object.keys(livePrices));
       console.log("[PRED] Generated", predictions.length, "predictions");
       return json(res, 200, result);
     } catch(e) {
