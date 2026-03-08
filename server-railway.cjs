@@ -488,31 +488,33 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
     }
   }
 
-  // GET /api/quote-debug — show raw Yahoo response for one symbol
+  // GET /api/quote-debug — test all price sources with EURUSD
   if (req.method === "GET" && url === "/api/quote-debug") {
+    const https = require("https");
+    const httpsGet = (host, path, hdrs={}) => new Promise((resolve, reject) => {
+      const r = https.request({ hostname: host, path, method: "GET", timeout: 8000,
+        headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json", ...hdrs }
+      }, (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve({d,status:resp.statusCode})); });
+      r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));}); r.end();
+    });
+    const results = {};
     try {
-      const https = require("https");
-      const consent = await new Promise((resolve, reject) => {
-        const r = https.request({ hostname: "finance.yahoo.com", path: "/", method: "GET", timeout: 8000,
-          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Accept": "text/html" }
-        }, (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve({d,headers:resp.headers,status:resp.statusCode})); });
-        r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));}); r.end();
-      });
-      const cookies = (consent.headers["set-cookie"]||[]).map(c=>c.split(";")[0]).join("; ");
-      const q = await new Promise((resolve, reject) => {
-        const r = https.request({ hostname: "query1.finance.yahoo.com",
-          path: "/v8/finance/quote?symbols=EURUSD%3DX&fields=regularMarketPrice,regularMarketChangePercent",
-          method: "GET", timeout: 8000,
-          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Cookie": cookies, "Referer": "https://finance.yahoo.com/" }
-        }, (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve({d,status:resp.statusCode,cookies:cookies.slice(0,80)})); });
-        r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));}); r.end();
-      });
-      return json(res, 200, { consentStatus: consent.status, cookiesFound: cookies.length, quoteStatus: q.status, body: q.d.slice(0, 500), cookies: q.cookies });
-    } catch(e) { return json(res, 500, { error: e.message }); }
+      const ff = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=EUR,GBP,JPY");
+      results.frankfurter = { status: ff.status, ok: ff.status===200, sample: ff.d.slice(0,120) };
+    } catch(e) { results.frankfurter = { error: e.message }; }
+    try {
+      const cg = await httpsGet("api.coingecko.com", "/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
+      results.coingecko = { status: cg.status, ok: cg.status===200, sample: cg.d.slice(0,80) };
+    } catch(e) { results.coingecko = { error: e.message }; }
+    try {
+      const yh = await httpsGet("query1.finance.yahoo.com", "/v8/finance/quote?symbols=EURUSD%3DX&fields=regularMarketPrice", { "Cookie": "B=1", "Referer": "https://finance.yahoo.com/" });
+      results.yahoo = { status: yh.status, ok: yh.status===200 && yh.d.includes("regularMarketPrice"), sample: yh.d.slice(0,120) };
+    } catch(e) { results.yahoo = { error: e.message }; }
+    return json(res, 200, results);
   }
 
-  // GET /api/quote?symbols=EURUSD,XAUUSD,...  — Yahoo Finance quotes (server-side)
+  // GET /api/quote?symbols=EURUSD,XAUUSD,...
+  // Sources: 1) Frankfurter (forex ECB) 2) Coingecko (crypto) 3) Yahoo Finance (best-effort)
   if (req.method === "GET" && url.startsWith("/api/quote")) {
     try {
       const qs = new URLSearchParams(fullUrl.split("?")[1]||"");
@@ -521,157 +523,201 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
 
       const https = require("https");
 
-      // Map TradeLedger symbol → Yahoo Finance ticker
-      const yhMap = {
-        "XAUUSD":"GC=F","XAGUSD":"SI=F","XPTUSD":"PL=F","XPDUSD":"PA=F",
-        "USOIL":"CL=F","UKOIL":"BZ=F","NATGAS":"NG=F",
-        "NAS100":"^IXIC","NASDAQ":"^IXIC","US30":"^DJI","SPX500":"^GSPC",
-        "UK100":"^FTSE","GER40":"^GDAXI","FRA40":"^FCHI","JPN225":"^N225",
-        "AUS200":"^AXJO","HK50":"^HSI","NIFTY50":"^NSEI","DXY":"DX-Y.NYB",
-        "BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","BNBUSD":"BNB-USD",
-        "SOLUSD":"SOL-USD","XRPUSD":"XRP-USD","ADAUSD":"ADA-USD",
-        "DOTUSD":"DOT-USD","LNKUSD":"LINK-USD",
-      };
-
-      // For forex pairs (6-char), use Yahoo =X suffix
-      const toYH = s => {
-        if (yhMap[s]) return yhMap[s];
-        if (s.length === 6) return s + "=X";
-        return s;
-      };
-
-      const tickers = raw.map(toYH).join(",");
-      const path = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
-                   "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose&lang=en-US&region=US";
-
-      // Helper: raw HTTPS get → string
-      const httpsGet = (host, p, hdrs={}) => new Promise((resolve, reject) => {
-        const opts = { hostname: host, path: p, method: "GET", timeout: 10000,
-          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5", "Accept-Encoding": "identity",
-            "Connection": "keep-alive", ...hdrs } };
+      // ── helpers ──────────────────────────────────────────────────────────
+      const httpsGet = (host, path, hdrs={}, timeout=10000) => new Promise((resolve, reject) => {
+        const opts = {
+          hostname: host, path, method: "GET", timeout,
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Encoding": "identity",
+            ...hdrs
+          }
+        };
         const r = https.request(opts, (resp) => {
-          let d = ""; resp.on("data", c => d += c);
-          resp.on("end", () => resolve({ text: d, status: resp.statusCode, headers: resp.headers }));
+          let d = "";
+          resp.on("data", c => d += c);
+          resp.on("end", () => resolve({ text: d, status: resp.statusCode, headers: resp.headers || {} }));
         });
-        r.on("error", reject); r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); }); r.end();
+        r.on("error", reject);
+        r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+        r.end();
       });
 
-      let results = [];
-      let fetchError = null;
+      // decimal places per symbol
+      const getDec = sym => sym.includes("JPY") ? 3
+        : ["XAUUSD","XAGUSD","BTCUSD","ETHUSD","BNBUSD","SOLUSD","SPX500","US30","NAS100",
+           "UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50","USOIL","UKOIL"].includes(sym) ? 2 : 5;
+      const fmt = (v, dec) => v != null && !isNaN(v) ? parseFloat(parseFloat(v).toFixed(dec)) : null;
 
-      // Strategy 1: Yahoo Finance v8 with cookie consent
-      try {
-        // Step 1: Get session cookies from yahoo finance homepage
-        const consent = await httpsGet("finance.yahoo.com", "/", {});
-        const cookies = (consent.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
-
-        // Step 2: Fetch quotes with cookies
-        const quotePath = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
-          "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose&lang=en-US&region=US";
-        const q1 = await httpsGet("query1.finance.yahoo.com", quotePath, {
-          "Cookie": cookies || "B=abc; YFC=abc",
-          "Referer": "https://finance.yahoo.com/",
-          "Origin": "https://finance.yahoo.com"
-        });
-        if (q1.status === 200 && q1.text.includes("regularMarketPrice")) {
-          const d = JSON.parse(q1.text);
-          results = d?.quoteResponse?.result || [];
-          console.log("[QUOTE] Yahoo v8 ok:", results.length, "results");
-        } else {
-          throw new Error("v8 status " + q1.status);
-        }
-      } catch(e1) {
-        fetchError = e1.message;
-        console.warn("[QUOTE] Yahoo v8 failed:", e1.message);
-
-        // Strategy 2: query2 host
-        try {
-          const quotePath = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
-            "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose";
-          const q2 = await httpsGet("query2.finance.yahoo.com", quotePath, {
-            "Cookie": "B=abc; YFC=abc",
-            "Referer": "https://finance.yahoo.com/"
-          });
-          if (q2.status === 200 && q2.text.includes("regularMarketPrice")) {
-            const d = JSON.parse(q2.text);
-            results = d?.quoteResponse?.result || [];
-            console.log("[QUOTE] Yahoo query2 ok:", results.length);
-          } else {
-            throw new Error("query2 status " + q2.status);
-          }
-        } catch(e2) {
-          console.warn("[QUOTE] Yahoo query2 failed:", e2.message);
-
-          // Strategy 3: Yahoo Finance v7 (older, sometimes unblocked)
-          try {
-            const quotePath = "/v7/finance/quote?symbols=" + encodeURIComponent(tickers);
-            const q3 = await httpsGet("query1.finance.yahoo.com", quotePath, {
-              "Cookie": "B=abc",
-              "Referer": "https://finance.yahoo.com/"
-            });
-            if (q3.status === 200 && q3.text.includes("result")) {
-              const d = JSON.parse(q3.text);
-              results = d?.quoteResponse?.result || [];
-              console.log("[QUOTE] Yahoo v7 ok:", results.length);
-            } else {
-              throw new Error("v7 status " + q3.status + " body: " + q3.text.slice(0,100));
-            }
-          } catch(e3) {
-            console.warn("[QUOTE] All Yahoo strategies failed:", e3.message);
-          }
-        }
-      }
+      // classify symbols
+      const CRYPTO_SYMS  = ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LNKUSD"];
+      const METALS_SYMS  = ["XAUUSD","XAGUSD","XPTUSD","XPDUSD"];
+      const INDICES_SYMS = ["NAS100","NASDAQ","US30","SPX500","UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50","DXY"];
+      const ENERGY_SYMS  = ["USOIL","UKOIL","NATGAS"];
+      const isForex = s => !CRYPTO_SYMS.includes(s) && !METALS_SYMS.includes(s) && !INDICES_SYMS.includes(s) && !ENERGY_SYMS.includes(s);
 
       const out = {};
-      for (let i = 0; i < raw.length; i++) {
-        const sym = raw[i];
-        const yh = toYH(sym);
-        const q = results.find(r => r.symbol === yh || r.symbol === sym);
-        if (!q) { out[sym] = null; continue; }
-        const dec = sym.includes("JPY") ? 3 : (["XAUUSD","BTCUSD","ETHUSD","SPX500","US30","NAS100","UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50"].includes(sym) ? 2 : 5);
-        const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
-        out[sym] = {
-          price:      fmt(q.regularMarketPrice, dec),
-          change:     fmt(q.regularMarketChange, dec),
-          changePct:  fmt(q.regularMarketChangePercent, 2),
-          high:       fmt(q.regularMarketDayHigh, dec),
-          low:        fmt(q.regularMarketDayLow, dec),
-          prevClose:  fmt(q.regularMarketPreviousClose, dec),
-        };
-      }
+      raw.forEach(s => { out[s] = null; });
 
-      // Fallback: for any symbols that got null, try Twelve Data free API
-      const nullSyms = raw.filter(s => out[s] === null);
-      if (nullSyms.length > 0) {
+      // ── SOURCE 1: Frankfurter (ECB forex rates) — always reliable ─────────
+      const forexSyms = raw.filter(isForex);
+      if (forexSyms.length) {
         try {
-          // Twelve Data free tier: supports forex, crypto, stocks, ETFs
-          // Map our symbols to Twelve Data format (forex uses "/" separator)
-          const tdMap = s => {
-            if (s.length === 6 && !s.includes("-")) return s.slice(0,3)+"/"+s.slice(3); // EURUSD → EUR/USD
-            if (s === "XAUUSD") return "XAU/USD";
-            if (s === "XAGUSD") return "XAG/USD";
-            if (s === "BTCUSD") return "BTC/USD";
-            if (s === "ETHUSD") return "ETH/USD";
-            return s;
-          };
-          const tdSyms = nullSyms.map(tdMap).join(",");
-          const tdPath = "/price?symbol=" + encodeURIComponent(tdSyms) + "&apikey=demo&format=JSON";
-          const tdResp = await httpsGet("api.twelvedata.com", tdPath, {});
-          if (tdResp.status === 200) {
-            const tdData = JSON.parse(tdResp.text);
-            nullSyms.forEach(sym => {
-              const tdSym = tdMap(sym);
-              const p = tdData[tdSym]?.price || (tdData.price);
-              if (p) out[sym] = { price: parseFloat(parseFloat(p).toFixed(5)), change: null, changePct: null, high: null, low: null, prevClose: null };
+          // Build a set of unique base currencies needed
+          const bases = [...new Set(forexSyms.map(s => s.slice(0,3)))];
+          const quoteCs = [...new Set(forexSyms.map(s => s.slice(3,6)))];
+          const allCurrencies = [...new Set([...bases, ...quoteCs])].filter(c => c !== "USD").join(",");
+
+          // Fetch latest rates (base USD, get everything)
+          const ffResp = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=" + allCurrencies, {});
+          if (ffResp.status === 200) {
+            const ffData = JSON.parse(ffResp.text);
+            const rates = { USD: 1, ...ffData.rates }; // rates vs USD
+
+            // Also get yesterday for prevClose
+            const yesterday = new Date(); yesterday.setDate(yesterday.getDate()-1);
+            if (yesterday.getDay() === 0) yesterday.setDate(yesterday.getDate()-2); // skip Sunday
+            if (yesterday.getDay() === 6) yesterday.setDate(yesterday.getDate()-1); // skip Saturday
+            const yStr = yesterday.toISOString().slice(0,10);
+            let prevRates = { USD: 1 };
+            try {
+              const prevResp = await httpsGet("api.frankfurter.app", "/" + yStr + "?from=USD&to=" + allCurrencies, {});
+              if (prevResp.status === 200) { const pd = JSON.parse(prevResp.text); prevRates = { USD: 1, ...pd.rates }; }
+            } catch(e) {}
+
+            forexSyms.forEach(sym => {
+              const base = sym.slice(0,3), quote = sym.slice(3,6);
+              // Convert: base/quote = (USD/quote) / (USD/base) = rates[quote] / rates[base]
+              const baseRate = rates[base] || null;
+              const quoteRate = rates[quote] || null;
+              if (!baseRate || !quoteRate) return;
+              const price = quoteRate / baseRate;
+              const prevBase = prevRates[base] || baseRate;
+              const prevQuote = prevRates[quote] || quoteRate;
+              const prevClose = prevQuote / prevBase;
+              const change = price - prevClose;
+              const changePct = (change / prevClose) * 100;
+              const dec = getDec(sym);
+              out[sym] = {
+                price:     fmt(price, dec),
+                change:    fmt(change, dec),
+                changePct: fmt(changePct, 2),
+                high:      null, // ECB doesn't provide intraday H/L
+                low:       null,
+                prevClose: fmt(prevClose, dec),
+              };
             });
-            console.log("[QUOTE] Twelve Data filled", nullSyms.length, "missing symbols");
+            console.log("[QUOTE] Frankfurter ok:", forexSyms.filter(s=>out[s]).length, "forex pairs");
           }
-        } catch(e) { console.warn("[QUOTE] Twelve Data fallback failed:", e.message); }
+        } catch(e) { console.warn("[QUOTE] Frankfurter failed:", e.message); }
       }
 
-      console.log(`[QUOTE] ${Object.keys(out).filter(k=>out[k]!=null).length}/${raw.length} symbols fetched`);
+      // ── SOURCE 2: CoinGecko (crypto) — free, no key ───────────────────────
+      const cryptoSyms = raw.filter(s => CRYPTO_SYMS.includes(s));
+      if (cryptoSyms.length) {
+        try {
+          const cgMap = {
+            "BTCUSD":"bitcoin","ETHUSD":"ethereum","BNBUSD":"binancecoin",
+            "SOLUSD":"solana","XRPUSD":"ripple","ADAUSD":"cardano",
+            "DOTUSD":"polkadot","LNKUSD":"chainlink"
+          };
+          const ids = cryptoSyms.map(s => cgMap[s]).filter(Boolean).join(",");
+          if (ids) {
+            const cgResp = await httpsGet("api.coingecko.com",
+              "/api/v3/coins/markets?vs_currency=usd&ids=" + ids + "&price_change_percentage=24h", {
+              "Accept": "application/json"
+            });
+            if (cgResp.status === 200) {
+              const cgData = JSON.parse(cgResp.text);
+              const cgById = {};
+              cgData.forEach(c => { cgById[c.id] = c; });
+              cryptoSyms.forEach(sym => {
+                const id = cgMap[sym];
+                const c = cgById[id];
+                if (!c) return;
+                const dec = getDec(sym);
+                out[sym] = {
+                  price:     fmt(c.current_price, dec),
+                  change:    fmt(c.price_change_24h, dec),
+                  changePct: fmt(c.price_change_percentage_24h, 2),
+                  high:      fmt(c.high_24h, dec),
+                  low:       fmt(c.low_24h, dec),
+                  prevClose: fmt(c.current_price - c.price_change_24h, dec),
+                };
+              });
+              console.log("[QUOTE] CoinGecko ok:", cryptoSyms.filter(s=>out[s]).length, "crypto");
+            }
+          }
+        } catch(e) { console.warn("[QUOTE] CoinGecko failed:", e.message); }
+      }
+
+      // ── SOURCE 3: Yahoo Finance (metals, indices, energy + forex fallback) ─
+      const yhNeeded = raw.filter(s => out[s] === null);
+      if (yhNeeded.length) {
+        try {
+          const yhMap = {
+            "XAUUSD":"GC=F","XAGUSD":"SI=F","XPTUSD":"PL=F","XPDUSD":"PA=F",
+            "USOIL":"CL=F","UKOIL":"BZ=F","NATGAS":"NG=F",
+            "NAS100":"^IXIC","NASDAQ":"^IXIC","US30":"^DJI","SPX500":"^GSPC",
+            "UK100":"^FTSE","GER40":"^GDAXI","FRA40":"^FCHI","JPN225":"^N225",
+            "AUS200":"^AXJO","HK50":"^HSI","NIFTY50":"^NSEI","DXY":"DX-Y.NYB",
+          };
+          const toYH = s => yhMap[s] || (s.length===6 ? s+"=X" : s);
+          const tickers = yhNeeded.map(toYH).join(",");
+
+          // Step 1: get cookies + crumb from Yahoo
+          let cookie = "";
+          let crumb = "";
+          try {
+            const consent = await httpsGet("finance.yahoo.com", "/", {
+              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+            }, 8000);
+            cookie = (consent.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
+            // Get crumb
+            const crumbResp = await httpsGet("query2.finance.yahoo.com", "/v1/test/getcrumb", {
+              "Cookie": cookie, "Referer": "https://finance.yahoo.com/"
+            }, 5000);
+            if (crumbResp.status === 200 && crumbResp.text && crumbResp.text.length < 20) {
+              crumb = crumbResp.text.trim();
+            }
+          } catch(e) { console.warn("[QUOTE] Yahoo crumb failed:", e.message); }
+
+          const crumbParam = crumb ? "&crumb=" + encodeURIComponent(crumb) : "";
+          const quotePath = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
+            "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose" + crumbParam;
+
+          const yhResp = await httpsGet("query1.finance.yahoo.com", quotePath, {
+            "Cookie": cookie || "B=1",
+            "Referer": "https://finance.yahoo.com/",
+          });
+
+          if (yhResp.status === 200 && yhResp.text.includes("regularMarketPrice")) {
+            const yhData = JSON.parse(yhResp.text);
+            const results = yhData?.quoteResponse?.result || [];
+            yhNeeded.forEach(sym => {
+              const yh = toYH(sym);
+              const q = results.find(r => r.symbol === yh || r.symbol === sym);
+              if (!q) return;
+              const dec = getDec(sym);
+              out[sym] = {
+                price:     fmt(q.regularMarketPrice, dec),
+                change:    fmt(q.regularMarketChange, dec),
+                changePct: fmt(q.regularMarketChangePercent, 2),
+                high:      fmt(q.regularMarketDayHigh, dec),
+                low:       fmt(q.regularMarketDayLow, dec),
+                prevClose: fmt(q.regularMarketPreviousClose, dec),
+              };
+            });
+            console.log("[QUOTE] Yahoo ok:", yhNeeded.filter(s=>out[s]).length, "symbols");
+          } else {
+            console.warn("[QUOTE] Yahoo returned status", yhResp.status, yhResp.text.slice(0,80));
+          }
+        } catch(e) { console.warn("[QUOTE] Yahoo failed:", e.message); }
+      }
+
+      const filled = raw.filter(s => out[s] !== null).length;
+      console.log(`[QUOTE] Done: ${filled}/${raw.length} symbols`);
       return json(res, 200, { quotes: out, fetchedAt: new Date().toISOString() });
     } catch(e) {
       console.warn("[QUOTE] Error:", e.message);
