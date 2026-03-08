@@ -899,15 +899,20 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // GET /api/predictions  — AI analyst predictions for GOLD and BTC using Groq
-  if (req.method === "GET" && url === "/api/predictions") {
+  // GET /api/predictions?symbols=XAUUSD,BTCUSD,...  — AI predictions for watchlist symbols
+  if (req.method === "GET" && url.startsWith("/api/predictions")) {
     try {
-      // Cache: regenerate every 4 hours
-      if (!global._predCache) global._predCache = { ts: 0, data: null };
+      const qs = new URLSearchParams(fullUrl.split("?")[1]||"");
+      const rawSyms = (qs.get("symbols")||"XAUUSD,BTCUSD").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean).slice(0,4);
+
+      // Cache key based on symbols (sorted) — regenerate every 4 hours
+      if (!global._predCache) global._predCache = {};
+      const cacheKey = rawSyms.slice().sort().join(",");
       const CACHE_TTL = 4 * 60 * 60 * 1000;
-      if (global._predCache.data && (Date.now() - global._predCache.ts) < CACHE_TTL) {
-        console.log("[PRED] Cache hit");
-        return json(res, 200, global._predCache.data);
+      const cached = global._predCache[cacheKey];
+      if (cached && (Date.now() - cached.ts) < CACHE_TTL) {
+        console.log("[PRED] Cache hit for", cacheKey);
+        return json(res, 200, cached.data);
       }
 
       const groqKey = process.env.GROQ_API_KEY || "";
@@ -916,48 +921,52 @@ const server = http.createServer(async (req, res) => {
       const https = require("https");
       const now = new Date();
       const dateStr = now.toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric", year:"numeric" });
-      const timeStr = now.toUTCString();
 
-      const prompt = `You are a professional market analyst providing price predictions for today, ${dateStr} (${timeStr}).
+      // Build a concise asset description for each symbol
+      const ASSET_META = {
+        XAUUSD:{name:"Gold",type:"commodity",note:"priced per troy oz in USD"},
+        XAGUSD:{name:"Silver",type:"commodity",note:"priced per troy oz in USD"},
+        BTCUSD:{name:"Bitcoin",type:"crypto",note:""},
+        ETHUSD:{name:"Ethereum",type:"crypto",note:""},
+        BNBUSD:{name:"BNB",type:"crypto",note:""},
+        SOLUSD:{name:"Solana",type:"crypto",note:""},
+        EURUSD:{name:"EUR/USD",type:"forex",note:"major pair"},
+        GBPUSD:{name:"GBP/USD",type:"forex",note:"major pair"},
+        USDJPY:{name:"USD/JPY",type:"forex",note:"major pair"},
+        GBPJPY:{name:"GBP/JPY",type:"forex",note:"cross pair"},
+        AUDUSD:{name:"AUD/USD",type:"forex",note:"commodity currency"},
+        USDCHF:{name:"USD/CHF",type:"forex",note:"safe-haven"},
+        USDCAD:{name:"USD/CAD",type:"forex",note:"oil-linked"},
+        NAS100:{name:"Nasdaq 100",type:"index",note:""},
+        SPX500:{name:"S&P 500",type:"index",note:""},
+        US30:{name:"Dow Jones",type:"index",note:""},
+        USOIL:{name:"WTI Crude Oil",type:"commodity",note:"priced per barrel"},
+      };
 
-Generate realistic analyst-style price predictions for GOLD (XAUUSD) and BTC (BTCUSD).
-Base your analysis on typical market patterns, key levels, and current macro environment (rate environment, dollar strength, risk sentiment).
+      const symbolList = rawSyms.map(s => {
+        const m = ASSET_META[s] || {name:s, type:"financial instrument"};
+        return `${s} (${m.name}${m.note?", "+m.note:""})`;
+      }).join(", ");
 
-Respond ONLY with a valid JSON array, no markdown, no explanation:
-[
-  {
-    "asset": "XAUUSD",
-    "name": "Gold",
-    "emoji": "🥇",
-    "bias": "bullish" or "bearish" or "neutral",
-    "target": number (realistic 1-day price target),
-    "support": number (key support level),
-    "resistance": number (key resistance level),  
-    "confidence": number (50-90, percentage),
+      const exampleObj = `{
+    "asset": "SYMBOL",
+    "name": "Asset Name",
+    "bias": "bullish|bearish|neutral",
+    "target": <realistic 1-day or 1-week price number>,
+    "support": <key support level number>,
+    "resistance": <key resistance level number>,
+    "confidence": <50-88 integer>,
     "timeframe": "Today" or "This Week",
-    "catalyst": "brief 1-sentence reason (e.g. 'Safe-haven demand ahead of NFP data')",
-    "analyst": "a plausible analyst name like 'Goldman Sachs Research' or 'JPMorgan Commodities'",
-    "signal": "BUY" or "SELL" or "HOLD"
-  },
-  {
-    "asset": "BTCUSD",
-    "name": "Bitcoin",
-    "emoji": "₿",
-    "bias": "bullish" or "bearish" or "neutral",
-    "target": number,
-    "support": number,
-    "resistance": number,
-    "confidence": number,
-    "timeframe": "Today" or "This Week",
-    "catalyst": "brief 1-sentence reason",
-    "analyst": "plausible analyst/firm name",
-    "signal": "BUY" or "SELL" or "HOLD"
-  }
-]`;
+    "catalyst": "<1-sentence reason based on macro/technical context>",
+    "analyst": "<realistic firm name e.g. Goldman Sachs Research, JPMorgan, Citi FX>",
+    "signal": "BUY|SELL|HOLD"
+  }`;
+
+      const prompt = "You are a professional market analyst. Today is " + dateStr + ".\n\nGenerate realistic price predictions for these " + rawSyms.length + " instruments: " + symbolList + "\n\nBase your analysis on realistic current market prices, key technical levels, and macro environment (Fed policy, dollar strength, risk sentiment, geopolitical factors).\n\nRespond ONLY with a valid JSON array of exactly " + rawSyms.length + " objects, no markdown, no extra text:\n[\n  " + exampleObj + "\n]\n\nMake prices realistic for each asset type. Gold typically ~$2000-3500/oz, BTC ~$30k-100k, forex pairs use standard pip values.";
 
       const body = JSON.stringify({
         model: "llama-3.1-8b-instant",
-        max_tokens: 600,
+        max_tokens: 800,
         messages: [{ role: "user", content: prompt }]
       });
 
@@ -976,8 +985,9 @@ Respond ONLY with a valid JSON array, no markdown, no explanation:
       if (!match) return json(res, 200, { predictions: [], error: "Parse failed: " + txt.slice(0,100) });
 
       const predictions = JSON.parse(match[0]);
-      const result = { predictions, generatedAt: now.toISOString() };
-      global._predCache = { ts: Date.now(), data: result };
+      const result = { predictions, generatedAt: now.toISOString(), symbols: rawSyms };
+      global._predCache[cacheKey] = { ts: Date.now(), data: result };
+      console.log("[PRED] Generated", predictions.length, "predictions for", cacheKey);
       console.log("[PRED] Generated", predictions.length, "predictions");
       return json(res, 200, result);
     } catch(e) {
