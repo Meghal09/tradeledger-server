@@ -899,6 +899,93 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // GET /api/predictions  — AI analyst predictions for GOLD and BTC using Groq
+  if (req.method === "GET" && url === "/api/predictions") {
+    try {
+      // Cache: regenerate every 4 hours
+      if (!global._predCache) global._predCache = { ts: 0, data: null };
+      const CACHE_TTL = 4 * 60 * 60 * 1000;
+      if (global._predCache.data && (Date.now() - global._predCache.ts) < CACHE_TTL) {
+        console.log("[PRED] Cache hit");
+        return json(res, 200, global._predCache.data);
+      }
+
+      const groqKey = process.env.GROQ_API_KEY || "";
+      if (!groqKey) return json(res, 200, { predictions: [], error: "GROQ_API_KEY not set" });
+
+      const https = require("https");
+      const now = new Date();
+      const dateStr = now.toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric", year:"numeric" });
+      const timeStr = now.toUTCString();
+
+      const prompt = `You are a professional market analyst providing price predictions for today, ${dateStr} (${timeStr}).
+
+Generate realistic analyst-style price predictions for GOLD (XAUUSD) and BTC (BTCUSD).
+Base your analysis on typical market patterns, key levels, and current macro environment (rate environment, dollar strength, risk sentiment).
+
+Respond ONLY with a valid JSON array, no markdown, no explanation:
+[
+  {
+    "asset": "XAUUSD",
+    "name": "Gold",
+    "emoji": "🥇",
+    "bias": "bullish" or "bearish" or "neutral",
+    "target": number (realistic 1-day price target),
+    "support": number (key support level),
+    "resistance": number (key resistance level),  
+    "confidence": number (50-90, percentage),
+    "timeframe": "Today" or "This Week",
+    "catalyst": "brief 1-sentence reason (e.g. 'Safe-haven demand ahead of NFP data')",
+    "analyst": "a plausible analyst name like 'Goldman Sachs Research' or 'JPMorgan Commodities'",
+    "signal": "BUY" or "SELL" or "HOLD"
+  },
+  {
+    "asset": "BTCUSD",
+    "name": "Bitcoin",
+    "emoji": "₿",
+    "bias": "bullish" or "bearish" or "neutral",
+    "target": number,
+    "support": number,
+    "resistance": number,
+    "confidence": number,
+    "timeframe": "Today" or "This Week",
+    "catalyst": "brief 1-sentence reason",
+    "analyst": "plausible analyst/firm name",
+    "signal": "BUY" or "SELL" or "HOLD"
+  }
+]`;
+
+      const body = JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        max_tokens: 600,
+        messages: [{ role: "user", content: prompt }]
+      });
+
+      const aiTxt = await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + groqKey, "Content-Length": Buffer.byteLength(body) }
+        }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
+        r.on("error", reject);
+        r.write(body); r.end();
+      });
+
+      const aiData = JSON.parse(aiTxt);
+      const txt = aiData.choices?.[0]?.message?.content?.trim() || "";
+      const match = txt.match(/\[[\s\S]*\]/);
+      if (!match) return json(res, 200, { predictions: [], error: "Parse failed: " + txt.slice(0,100) });
+
+      const predictions = JSON.parse(match[0]);
+      const result = { predictions, generatedAt: now.toISOString() };
+      global._predCache = { ts: Date.now(), data: result };
+      console.log("[PRED] Generated", predictions.length, "predictions");
+      return json(res, 200, result);
+    } catch(e) {
+      console.warn("[PRED] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   // GET /api/news  — Yahoo Finance top stories (server-side, no CORS)
   if (req.method === "GET" && url === "/api/news") {
     try {
