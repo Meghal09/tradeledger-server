@@ -379,6 +379,76 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
     }
   }
 
+  // GET /api/news  — Yahoo Finance top stories (server-side, no CORS)
+  if (req.method === "GET" && url === "/api/news") {
+    try {
+      const https = require("https");
+      const sources = [
+        { url: "https://finance.yahoo.com/news/rssindex", label: "Yahoo Finance" },
+        { url: "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US", label: "Yahoo Finance" },
+        { url: "https://www.forexlive.com/feed/news", label: "ForexLive" },
+      ];
+
+      const fetchRSS = (rssUrl) => new Promise((resolve) => {
+        const parsed = new URL(rssUrl);
+        const options = {
+          hostname: parsed.hostname,
+          path: parsed.pathname + parsed.search,
+          method: "GET",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (compatible; TradeLedger/1.0)",
+            "Accept": "application/rss+xml, application/xml, text/xml, */*",
+          },
+          timeout: 8000,
+        };
+        const r = https.request(options, (resp) => {
+          // Follow redirects
+          if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+            resolve(fetchRSS(resp.headers.location));
+            return;
+          }
+          let d = "";
+          resp.on("data", c => d += c);
+          resp.on("end", () => resolve(d));
+        });
+        r.on("error", () => resolve(""));
+        r.on("timeout", () => { r.destroy(); resolve(""); });
+        r.end();
+      });
+
+      const parseRSS = (xml, label) => {
+        const items = [];
+        const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/g) || [];
+        for (const item of itemMatches.slice(0, 20)) {
+          const title = (item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || item.match(/<title>(.*?)<\/title>/)|| [])[1]?.trim() || "";
+          const link = (item.match(/<link>(.*?)<\/link>/) || item.match(/<link href="(.*?)"/) || [])[1]?.trim() || "";
+          const desc = ((item.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/) || item.match(/<description>(.*?)<\/description>/) || [])[1] || "")
+            .replace(/<[^>]*>/g, "").trim().slice(0, 220);
+          const pub = (item.match(/<pubDate>(.*?)<\/pubDate>/) || [])[1]?.trim() || "";
+          if (title.length > 8) items.push({ title, link, description: desc, pubDate: pub, source: label });
+        }
+        return items;
+      };
+
+      // Try sources in order, return first that gives 5+ articles
+      for (const src of sources) {
+        try {
+          const xml = await fetchRSS(src.url);
+          if (!xml || xml.includes("Access Denied") || xml.includes("<!DOCTYPE")) continue;
+          const items = parseRSS(xml, src.label);
+          if (items.length >= 5) {
+            console.log(`[NEWS] ${src.label}: ${items.length} articles`);
+            return json(res, 200, { articles: items, source: src.label, fetchedAt: new Date().toISOString() });
+          }
+        } catch(e) { console.warn("[NEWS] failed:", src.url, e.message); }
+      }
+      return json(res, 200, { articles: [], source: "none", fetchedAt: new Date().toISOString() });
+    } catch(e) {
+      console.warn("[NEWS] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
