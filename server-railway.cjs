@@ -596,6 +596,44 @@ const server = http.createServer(async (req, res) => {
         } catch(e) { console.warn("[QUOTE] Frankfurter failed:", e.message); }
       }
 
+      // ── SOURCE 1b: Frankfurter metals (XAU, XAG via ECB) ────────────────────
+      const metalSyms = raw.filter(s => METALS_SYMS.includes(s));
+      if (metalSyms.length) {
+        try {
+          // Frankfurter supports XAU (gold) and XAG (silver) as base currencies
+          const metResp = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=XAU,XAG", {});
+          if (metResp.status === 200) {
+            const metData = JSON.parse(metResp.text);
+            const rates = metData.rates || {}; // rates[XAU] = how much XAU per 1 USD
+            // price of 1 XAU in USD = 1 / rates.XAU
+            const xauUsd = rates.XAU ? 1 / rates.XAU : null;
+            const xagUsd = rates.XAG ? 1 / rates.XAG : null;
+            if (xauUsd && out["XAUUSD"] === null) {
+              // Get prev day for change calculation
+              const yesterday = new Date(); yesterday.setDate(yesterday.getDate()-1);
+              if (yesterday.getDay()===0) yesterday.setDate(yesterday.getDate()-2);
+              if (yesterday.getDay()===6) yesterday.setDate(yesterday.getDate()-1);
+              const yStr = yesterday.toISOString().slice(0,10);
+              let prevXau = xauUsd;
+              try {
+                const prevResp = await httpsGet("api.frankfurter.app", "/" + yStr + "?from=USD&to=XAU", {});
+                if (prevResp.status === 200) {
+                  const pd = JSON.parse(prevResp.text);
+                  if (pd.rates?.XAU) prevXau = 1 / pd.rates.XAU;
+                }
+              } catch(e) {}
+              const change = xauUsd - prevXau;
+              const changePct = (change / prevXau) * 100;
+              out["XAUUSD"] = { price: fmt(xauUsd,2), change: fmt(change,2), changePct: fmt(changePct,2), high: null, low: null, prevClose: fmt(prevXau,2) };
+              console.log("[QUOTE] Frankfurter XAU/USD:", xauUsd.toFixed(2));
+            }
+            if (xagUsd && out["XAGUSD"] === null) {
+              out["XAGUSD"] = { price: fmt(xagUsd,2), change: null, changePct: null, high: null, low: null, prevClose: null };
+            }
+          }
+        } catch(e) { console.warn("[QUOTE] Frankfurter metals failed:", e.message); }
+      }
+
       // ── SOURCE 2: CoinGecko (crypto) — free, no key ───────────────────────
       const cryptoSyms = raw.filter(s => CRYPTO_SYMS.includes(s));
       if (cryptoSyms.length) {
