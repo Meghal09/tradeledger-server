@@ -716,122 +716,145 @@ const server = http.createServer(async (req, res) => {
       if (!articleUrl) return json(res, 400, { error: "url required" });
 
       const https = require("https");
-      const http = require("http");
+      const http  = require("http");
       const { URL: URLClass } = require("url");
+      const hostname = new URLClass(articleUrl).hostname.replace("www.","");
 
-      const fetchPage = (pageUrl, redirects=0) => new Promise((resolve, reject) => {
+      // ── helper: raw fetch with redirect follow ────────────────────────
+      const fetchRaw = (pageUrl, hdrs={}, redirects=0) => new Promise((resolve, reject) => {
         if (redirects > 5) { reject(new Error("too many redirects")); return; }
         const parsed = new URLClass(pageUrl);
         const lib = parsed.protocol === "https:" ? https : http;
-        const options = {
-          hostname: parsed.hostname,
-          path: parsed.pathname + parsed.search,
-          method: "GET",
+        const r = lib.request({
+          hostname: parsed.hostname, path: parsed.pathname + parsed.search,
+          method: "GET", timeout: 12000,
           headers: {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)",
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-          },
-          timeout: 10000,
-        };
-        const r = lib.request(options, (resp) => {
+            "Accept-Encoding": "identity",
+            "Cache-Control": "no-cache",
+            ...hdrs
+          }
+        }, (resp) => {
           if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
             const loc = resp.headers.location.startsWith("http") ? resp.headers.location : parsed.origin + resp.headers.location;
-            resolve(fetchPage(loc, redirects + 1)); return;
+            resolve(fetchRaw(loc, hdrs, redirects+1)); return;
           }
-          let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve({ html: d, status: resp.statusCode }));
+          let d = ""; resp.on("data", c => d += c);
+          resp.on("end", () => resolve({ html: d, status: resp.statusCode }));
         });
         r.on("error", reject);
         r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
         r.end();
       });
 
-      const { html, status } = await fetchPage(articleUrl);
-      if (!html || html.length < 200) return json(res, 422, { error: "Article could not be loaded" });
+      // ── helper: detect consent/paywall/block pages ────────────────────
+      const isBlocked = (html) => {
+        const s = html.slice(0, 8000).toLowerCase();
+        return [
+          // GDPR consent walls (Yahoo, Google, etc.)
+          "je privacy is belangrijk","uw privacy is belangrijk","privacy is important to us",
+          "cookie consent","consent.yahoo.com","guce.yahoo.com","privacy dashboard",
+          "cookiewall","manage privacy settings","accept all cookies","cookie-wall",
+          "privacyinstellingen","cookiebeleid","toestemming","privacybeleid",
+          // Bot protection
+          "captcha-delivery","geo.captcha","datadome","dd={'rt'","__cf_bm",
+          "enable js and disable any ad blocker","please enable javascript",
+          "cf-browser-verification","bot protection","access denied",
+          // Paywalls
+          "subscribe to read","subscription required","subscriber-only",
+          "sign in to read","create account to continue","log in to read",
+          "paywall","metered-content","piano-paywall","register to read",
+          "you've used","free articles","article limit",
+        ].some(b => s.includes(b)) || (html.length < 1500);
+      };
 
-      // Detect paywalls / bot protection — check first 5000 chars
-      const htmlStart = html.slice(0, 5000);
-      const htmlLower = htmlStart.toLowerCase();
-      const blockers = [
-        "enable js","disable any ad blocker","captcha-delivery","please enable javascript",
-        "403 forbidden","access denied","cf-browser-verification","__cf_bm","datadome",
-        "subscribe to read","subscription required","subscriber-only","sign in to read",
-        "create account to continue","geo.captcha","dd={'rt'","cid':'AH","bot protection",
-        "paywall","metered-content","piano-paywall","tp-modal","tp-container",
-        "you've used","free articles","free article","article limit","register to read",
-        "already a subscriber","log in to read"
-      ];
-      // Also block if body is suspiciously short (blocked pages are tiny)
-      const blocked = blockers.some(b => htmlLower.includes(b)) || (html.length < 2000 && status === 200);
-      if (blocked) {
-        return json(res, 200, {
-          title: "", description: "", image: "", blocks: [],
-          source: new URL(articleUrl).hostname,
-          paywalled: true,
-          error: null
+      // ── helper: extract readable content from HTML ────────────────────
+      const extractContent = (html, sourceUrl) => {
+        // Title
+        const titleM = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const title = titleM ? titleM[1].replace(/\s*[|\-–—].*$/, "").trim() : "";
+
+        // Meta description
+        const descM = html.match(/<meta[^>]+(?:name|property)="(?:og:description|description)"[^>]+content="([^"]{20,})"/i)
+                   || html.match(/<meta[^>]+content="([^"]{20,})"[^>]+(?:name|property)="(?:og:description|description)"/i);
+        const description = descM ? descM[1] : "";
+
+        // og:image
+        const imgM = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)
+                  || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
+        const image = imgM ? imgM[1] : "";
+
+        // Article body
+        const articleM = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+        const mainM    = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+        let section = (articleM?.[1] || mainM?.[1] || html)
+          .replace(/<script[\s\S]*?<\/script>/gi, "")
+          .replace(/<style[\s\S]*?<\/style>/gi, "")
+          .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+          .replace(/<header[\s\S]*?<\/header>/gi, "")
+          .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+          .replace(/<aside[\s\S]*?<\/aside>/gi, "")
+          .replace(/<figure[\s\S]*?<\/figure>/gi, "")
+          .replace(/<!--[\s\S]*?-->/g, "");
+
+        const blocks = [];
+        const all = section.match(/<(?:p|h[1-4])[^>]*>[\s\S]*?<\/(?:p|h[1-4])>/gi) || [];
+        all.forEach(b => {
+          const isH = /^<h[1-4]/i.test(b);
+          const text = b.replace(/<[^>]+>/g," ").replace(/&nbsp;/g," ").replace(/&amp;/g,"&")
+            .replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&#39;/g,"'")
+            .replace(/\s+/g," ").trim();
+          if (text.length > 25) blocks.push({ type: isH ? "heading" : "paragraph", text });
         });
+
+        return { title, description, image, blocks: blocks.slice(0,60), source: hostname };
+      };
+
+      // ── STRATEGY 1: use archive.ph / 12ft.io for paywalled/GDPR sites ─
+      // Known problematic domains that need bypass
+      const needsBypass = [
+        "yahoo.com","finance.yahoo.com","wsj.com","ft.com","bloomberg.com",
+        "nytimes.com","economist.com","seekingalpha.com","barrons.com"
+      ];
+      const requiresBypass = needsBypass.some(d => hostname.includes(d));
+
+      if (requiresBypass) {
+        // Try 12ft.io reader proxy (strips paywalls and consent walls)
+        try {
+          const proxyUrl = "https://12ft.io/proxy?q=" + encodeURIComponent(articleUrl);
+          const { html, status } = await fetchRaw(proxyUrl, {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
+          });
+          if (status === 200 && html.length > 3000 && !isBlocked(html)) {
+            const content = extractContent(html, articleUrl);
+            if (content.blocks.length >= 2) {
+              console.log("[READ] 12ft.io ok:", content.blocks.length, "blocks for", hostname);
+              return json(res, 200, { ...content, paywalled: false });
+            }
+          }
+        } catch(e) { console.warn("[READ] 12ft failed:", e.message); }
+
+        // 12ft failed — return paywalled with RSS data (caller has title+description already)
+        console.log("[READ] Bypass failed for", hostname, "— returning paywalled");
+        return json(res, 200, { title:"", description:"", image:"", blocks:[], source: hostname, paywalled: true });
       }
 
-      // Extract title
-      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
-      const title = titleMatch ? titleMatch[1].replace(/\s*[|\-–—].*$/, "").trim() : "";
-
-      // Extract meta description
-      const descMatch = html.match(/<meta[^>]+(?:name|property)="(?:description|og:description)"[^>]+content="([^"]+)"/i)
-                     || html.match(/<meta[^>]+content="([^"]+)"[^>]+(?:name|property)="(?:description|og:description)"/i);
-      const description = descMatch ? descMatch[1] : "";
-
-      // Extract og:image
-      const imgMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)
-                    || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
-      const image = imgMatch ? imgMatch[1] : "";
-
-      // Extract article body — look for <article>, then <main>, then biggest <div>
-      let body = "";
-      const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
-      const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
-      const bodySection = articleMatch?.[1] || mainMatch?.[1] || html;
-
-      // Strip scripts, styles, nav, header, footer, aside
-      let clean = bodySection
-        .replace(/<script[\s\S]*?<\/script>/gi, "")
-        .replace(/<style[\s\S]*?<\/style>/gi, "")
-        .replace(/<nav[\s\S]*?<\/nav>/gi, "")
-        .replace(/<header[\s\S]*?<\/header>/gi, "")
-        .replace(/<footer[\s\S]*?<\/footer>/gi, "")
-        .replace(/<aside[\s\S]*?<\/aside>/gi, "")
-        .replace(/<figure[\s\S]*?<\/figure>/gi, "")
-        .replace(/<!--[\s\S]*?-->/g, "");
-
-      // Extract paragraphs
-      const paragraphs = [];
-      const pMatches = clean.match(/<p[^>]*>([\s\S]*?)<\/p>/gi) || [];
-      const h2Matches = clean.match(/<h[1-4][^>]*>([\s\S]*?)<\/h[1-4]>/gi) || [];
-
-      // Interleave headings and paragraphs preserving order
-      const allBlocks = (clean.match(/<(?:p|h[1-4])[^>]*>[\s\S]*?<\/(?:p|h[1-4])>/gi) || [])
-        .map(b => {
-          const isHeading = /^<h[1-4]/i.test(b);
-          const text = b.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
-                        .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
-                        .replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
-          return text.length > 20 ? { type: isHeading ? "heading" : "paragraph", text } : null;
-        })
-        .filter(Boolean);
-
-      if (allBlocks.length < 3) {
-        // Fallback: strip all HTML and split on double newlines
-        const stripped = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-        const words = stripped.split(" ");
-        // Find article-like content (dense text)
-        for (let i = 0; i < Math.min(words.length, 2000); i += 80) {
-          const chunk = words.slice(i, i+80).join(" ").trim();
-          if (chunk.length > 100) allBlocks.push({ type: "paragraph", text: chunk });
-        }
+      // ── STRATEGY 2: Direct fetch for open sites ───────────────────────
+      const { html, status } = await fetchRaw(articleUrl);
+      if (!html || html.length < 500) {
+        return json(res, 200, { title:"", description:"", image:"", blocks:[], source: hostname, paywalled: true });
       }
 
-      console.log(`[READ] ${articleUrl.slice(0,60)} → ${allBlocks.length} blocks`);
-      return json(res, 200, { title, description, image, blocks: allBlocks.slice(0, 60), source: new URLClass(articleUrl).hostname });
+      if (isBlocked(html)) {
+        console.log("[READ] Blocked page detected for", hostname);
+        return json(res, 200, { title:"", description:"", image:"", blocks:[], source: hostname, paywalled: true });
+      }
+
+      const content = extractContent(html, articleUrl);
+      console.log("[READ] Direct ok:", content.blocks.length, "blocks for", hostname);
+      return json(res, 200, { ...content, paywalled: content.blocks.length < 2 });
     } catch(e) {
       console.warn("[READ] Error:", e.message);
       return json(res, 500, { error: e.message });
