@@ -488,6 +488,30 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
     }
   }
 
+  // GET /api/quote-debug — show raw Yahoo response for one symbol
+  if (req.method === "GET" && url === "/api/quote-debug") {
+    try {
+      const https = require("https");
+      const consent = await new Promise((resolve, reject) => {
+        const r = https.request({ hostname: "finance.yahoo.com", path: "/", method: "GET", timeout: 8000,
+          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36", "Accept": "text/html" }
+        }, (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve({d,headers:resp.headers,status:resp.statusCode})); });
+        r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));}); r.end();
+      });
+      const cookies = (consent.headers["set-cookie"]||[]).map(c=>c.split(";")[0]).join("; ");
+      const q = await new Promise((resolve, reject) => {
+        const r = https.request({ hostname: "query1.finance.yahoo.com",
+          path: "/v8/finance/quote?symbols=EURUSD%3DX&fields=regularMarketPrice,regularMarketChangePercent",
+          method: "GET", timeout: 8000,
+          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Cookie": cookies, "Referer": "https://finance.yahoo.com/" }
+        }, (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve({d,status:resp.statusCode,cookies:cookies.slice(0,80)})); });
+        r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));}); r.end();
+      });
+      return json(res, 200, { consentStatus: consent.status, cookiesFound: cookies.length, quoteStatus: q.status, body: q.d.slice(0, 500), cookies: q.cookies });
+    } catch(e) { return json(res, 500, { error: e.message }); }
+  }
+
   // GET /api/quote?symbols=EURUSD,XAUUSD,...  — Yahoo Finance quotes (server-side)
   if (req.method === "GET" && url.startsWith("/api/quote")) {
     try {
@@ -520,39 +544,85 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
       const path = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
                    "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose&lang=en-US&region=US";
 
-      const fetchYahoo = () => new Promise((resolve, reject) => {
-        const options = {
-          hostname: "query1.finance.yahoo.com",
-          path,
-          method: "GET",
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-          },
-          timeout: 10000,
-        };
-        const r = https.request(options, (resp) => {
-          // Follow one redirect
-          if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
-            const loc = resp.headers.location;
-            const url2 = new URL(loc);
-            const opts2 = { ...options, hostname: url2.hostname, path: url2.pathname + url2.search };
-            const r2 = https.request(opts2, (resp2) => {
-              let d = ""; resp2.on("data", c => d += c); resp2.on("end", () => resolve(d));
-            });
-            r2.on("error", reject); r2.end(); return;
-          }
-          let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d));
+      // Helper: raw HTTPS get → string
+      const httpsGet = (host, p, hdrs={}) => new Promise((resolve, reject) => {
+        const opts = { hostname: host, path: p, method: "GET", timeout: 10000,
+          headers: { "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5", "Accept-Encoding": "identity",
+            "Connection": "keep-alive", ...hdrs } };
+        const r = https.request(opts, (resp) => {
+          let d = ""; resp.on("data", c => d += c);
+          resp.on("end", () => resolve({ text: d, status: resp.statusCode, headers: resp.headers }));
         });
-        r.on("error", reject);
-        r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
-        r.end();
+        r.on("error", reject); r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); }); r.end();
       });
 
-      const raw2 = await fetchYahoo();
-      const data = JSON.parse(raw2);
-      const results = data?.quoteResponse?.result || [];
+      let results = [];
+      let fetchError = null;
+
+      // Strategy 1: Yahoo Finance v8 with cookie consent
+      try {
+        // Step 1: Get session cookies from yahoo finance homepage
+        const consent = await httpsGet("finance.yahoo.com", "/", {});
+        const cookies = (consent.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
+
+        // Step 2: Fetch quotes with cookies
+        const quotePath = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
+          "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose&lang=en-US&region=US";
+        const q1 = await httpsGet("query1.finance.yahoo.com", quotePath, {
+          "Cookie": cookies || "B=abc; YFC=abc",
+          "Referer": "https://finance.yahoo.com/",
+          "Origin": "https://finance.yahoo.com"
+        });
+        if (q1.status === 200 && q1.text.includes("regularMarketPrice")) {
+          const d = JSON.parse(q1.text);
+          results = d?.quoteResponse?.result || [];
+          console.log("[QUOTE] Yahoo v8 ok:", results.length, "results");
+        } else {
+          throw new Error("v8 status " + q1.status);
+        }
+      } catch(e1) {
+        fetchError = e1.message;
+        console.warn("[QUOTE] Yahoo v8 failed:", e1.message);
+
+        // Strategy 2: query2 host
+        try {
+          const quotePath = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
+            "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose";
+          const q2 = await httpsGet("query2.finance.yahoo.com", quotePath, {
+            "Cookie": "B=abc; YFC=abc",
+            "Referer": "https://finance.yahoo.com/"
+          });
+          if (q2.status === 200 && q2.text.includes("regularMarketPrice")) {
+            const d = JSON.parse(q2.text);
+            results = d?.quoteResponse?.result || [];
+            console.log("[QUOTE] Yahoo query2 ok:", results.length);
+          } else {
+            throw new Error("query2 status " + q2.status);
+          }
+        } catch(e2) {
+          console.warn("[QUOTE] Yahoo query2 failed:", e2.message);
+
+          // Strategy 3: Yahoo Finance v7 (older, sometimes unblocked)
+          try {
+            const quotePath = "/v7/finance/quote?symbols=" + encodeURIComponent(tickers);
+            const q3 = await httpsGet("query1.finance.yahoo.com", quotePath, {
+              "Cookie": "B=abc",
+              "Referer": "https://finance.yahoo.com/"
+            });
+            if (q3.status === 200 && q3.text.includes("result")) {
+              const d = JSON.parse(q3.text);
+              results = d?.quoteResponse?.result || [];
+              console.log("[QUOTE] Yahoo v7 ok:", results.length);
+            } else {
+              throw new Error("v7 status " + q3.status + " body: " + q3.text.slice(0,100));
+            }
+          } catch(e3) {
+            console.warn("[QUOTE] All Yahoo strategies failed:", e3.message);
+          }
+        }
+      }
 
       const out = {};
       for (let i = 0; i < raw.length; i++) {
@@ -560,7 +630,7 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
         const yh = toYH(sym);
         const q = results.find(r => r.symbol === yh || r.symbol === sym);
         if (!q) { out[sym] = null; continue; }
-        const dec = sym.includes("JPY") ? 3 : (["XAUUSD","BTCUSD","ETHUSD","SPX500","US30","NAS100","UK100","GER40","FRA40","JPN225","AUS200","HK50"].includes(sym) ? 2 : 5);
+        const dec = sym.includes("JPY") ? 3 : (["XAUUSD","BTCUSD","ETHUSD","SPX500","US30","NAS100","UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50"].includes(sym) ? 2 : 5);
         const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
         out[sym] = {
           price:      fmt(q.regularMarketPrice, dec),
@@ -572,7 +642,36 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
         };
       }
 
-      console.log(`[QUOTE] ${Object.keys(out).length} symbols fetched`);
+      // Fallback: for any symbols that got null, try Twelve Data free API
+      const nullSyms = raw.filter(s => out[s] === null);
+      if (nullSyms.length > 0) {
+        try {
+          // Twelve Data free tier: supports forex, crypto, stocks, ETFs
+          // Map our symbols to Twelve Data format (forex uses "/" separator)
+          const tdMap = s => {
+            if (s.length === 6 && !s.includes("-")) return s.slice(0,3)+"/"+s.slice(3); // EURUSD → EUR/USD
+            if (s === "XAUUSD") return "XAU/USD";
+            if (s === "XAGUSD") return "XAG/USD";
+            if (s === "BTCUSD") return "BTC/USD";
+            if (s === "ETHUSD") return "ETH/USD";
+            return s;
+          };
+          const tdSyms = nullSyms.map(tdMap).join(",");
+          const tdPath = "/price?symbol=" + encodeURIComponent(tdSyms) + "&apikey=demo&format=JSON";
+          const tdResp = await httpsGet("api.twelvedata.com", tdPath, {});
+          if (tdResp.status === 200) {
+            const tdData = JSON.parse(tdResp.text);
+            nullSyms.forEach(sym => {
+              const tdSym = tdMap(sym);
+              const p = tdData[tdSym]?.price || (tdData.price);
+              if (p) out[sym] = { price: parseFloat(parseFloat(p).toFixed(5)), change: null, changePct: null, high: null, low: null, prevClose: null };
+            });
+            console.log("[QUOTE] Twelve Data filled", nullSyms.length, "missing symbols");
+          }
+        } catch(e) { console.warn("[QUOTE] Twelve Data fallback failed:", e.message); }
+      }
+
+      console.log(`[QUOTE] ${Object.keys(out).filter(k=>out[k]!=null).length}/${raw.length} symbols fetched`);
       return json(res, 200, { quotes: out, fetchedAt: new Date().toISOString() });
     } catch(e) {
       console.warn("[QUOTE] Error:", e.message);
