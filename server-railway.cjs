@@ -905,15 +905,17 @@ const server = http.createServer(async (req, res) => {
       const qs = new URLSearchParams(fullUrl.split("?")[1]||"");
       const rawSyms = (qs.get("symbols")||"XAUUSD,BTCUSD").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean).slice(0,4);
 
-      // Cache: 1 hour (short — prices move)
+      // Cache: 30min per symbol-set; ?bust=1 forces regeneration
       if (!global._predCache) global._predCache = {};
       const cacheKey = rawSyms.slice().sort().join(",");
-      const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+      const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
+      const forceBust = qs.get("bust") === "1";
       const cached = global._predCache[cacheKey];
-      if (cached && (Date.now() - cached.ts) < CACHE_TTL) {
+      if (!forceBust && cached && (Date.now() - cached.ts) < CACHE_TTL) {
         console.log("[PRED] Cache hit for", cacheKey);
         return json(res, 200, cached.data);
       }
+      if (forceBust) { delete global._predCache[cacheKey]; console.log("[PRED] Cache busted for", cacheKey); }
 
       const groqKey = process.env.GROQ_API_KEY || "";
       if (!groqKey) return json(res, 200, { predictions: [], error: "GROQ_API_KEY not set" });
