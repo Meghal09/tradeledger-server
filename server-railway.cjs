@@ -152,17 +152,32 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // GET /api/calendar?date=YYYY-MM-DD  — Trading Economics + fallbacks
+  // GET /api/calendar?date=YYYY-MM-DD  — investing.com scraper + fallbacks
   if (req.method === "GET" && url === "/api/calendar") {
     const qs   = new URL(req.url, "http://x").searchParams;
     const date = qs.get("date");
     if (!date) return json(res, 400, { error: "date param required" });
 
     const https = require("https");
-    const fetchUrl = (u, opts) => new Promise((resolve, reject) => {
-      const options = Object.assign({ headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }, timeout: 8000 }, opts || {});
-      const r = https.get(u, options, (resp) => {
-        let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve({ status: resp.statusCode, text: d }));
+
+    // Generic POST helper (investing.com needs POST)
+    const httpPost = (hostname, path, postBody, headers) => new Promise((resolve, reject) => {
+      const buf = Buffer.from(postBody);
+      const opts = { hostname, path, method: "POST", timeout: 12000,
+        headers: Object.assign({ "Content-Length": buf.length }, headers) };
+      const r = https.request(opts, (resp) => {
+        let d = ""; resp.on("data", c => d += c);
+        resp.on("end", () => resolve({ status: resp.statusCode, text: d, headers: resp.headers }));
+      });
+      r.on("error", reject);
+      r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+      r.write(buf); r.end();
+    });
+
+    const httpGet = (u, headers) => new Promise((resolve, reject) => {
+      const r = https.get(u, { headers: Object.assign({ "User-Agent": "Mozilla/5.0" }, headers || {}), timeout: 10000 }, (resp) => {
+        let d = ""; resp.on("data", c => d += c);
+        resp.on("end", () => resolve({ status: resp.statusCode, text: d }));
       });
       r.on("error", reject);
       r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
@@ -175,40 +190,72 @@ const server = http.createServer(async (req, res) => {
       return loc === ds;
     }).sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    // ── Source 1: Trading Economics (guest:guest free tier) ──────────────────
-    // Returns current week events. importance: 1=low, 2=medium, 3=high
+    // ── Source 1: investing.com (POST to their internal API, no key needed) ───
+    // They use a form POST that returns JSON — works server-side without CORS
     try {
-      const d = new Date(date + "T00:00:00Z");
-      const d2 = new Date(d); d2.setDate(d2.getDate() + 1);
-      const fmt = x => x.toISOString().slice(0,10);
-      // Major forex countries only to keep response size small
-      const countries = "united states,euro area,united kingdom,japan,australia,canada,new zealand,switzerland,china";
-      const teUrl = `https://api.tradingeconomics.com/calendar/country/${encodeURIComponent(countries)}/${fmt(d)}/${fmt(d2)}?c=guest:guest&f=json`;
-      const { status, text } = await fetchUrl(teUrl);
-      if (status === 200 && text && !text.includes("Forbidden")) {
-        const arr = JSON.parse(text);
-        if (Array.isArray(arr) && arr.length) {
-          const impMap = { 1: "low", 2: "medium", 3: "high" };
-          const events = arr.map(e => ({
-            date:     e.Date || "",
-            currency: e.Currency || e.Country || "",
-            name:     e.Event || e.Category || "",
-            impact:   impMap[e.Importance] || (e.Importance === 3 ? "high" : e.Importance === 2 ? "medium" : "low"),
-            actual:   (e.Actual   != null && e.Actual   !== "") ? String(e.Actual)   : null,
-            forecast: (e.Forecast != null && e.Forecast !== "") ? String(e.Forecast) : null,
-            previous: (e.Previous != null && e.Previous !== "") ? String(e.Previous) : null,
-            source:   "tradingeconomics",
-          }));
-          const hits = filterDay(events, date);
-          if (hits.length > 0) {
-            console.log(`[CAL] Trading Economics: ${hits.length} events for ${date}`);
-            return json(res, 200, { events: hits, source: "tradingeconomics" });
+      const [y, m, d2] = date.split("-");
+      // investing.com uses a different date range format: dateFrom, dateTo
+      const dateFrom = date;
+      const dateTo   = date;
+      const postBody = `dateFrom=${dateFrom}&dateTo=${dateTo}&timeZone=55&timeFilter=timeRemain&currentTab=custom&submitFilters=1&limit_from=0`;
+      const { status, text } = await httpPost(
+        "www.investing.com",
+        "/economic-calendar/Service/getCalendarFilteredData",
+        postBody,
+        {
+          "Content-Type":   "application/x-www-form-urlencoded",
+          "X-Requested-With": "XMLHttpRequest",
+          "Referer":        "https://www.investing.com/economic-calendar/",
+          "User-Agent":     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Accept":         "application/json, text/javascript, */*; q=0.01",
+          "Accept-Language":"en-US,en;q=0.9",
+          "Origin":         "https://www.investing.com",
+        }
+      );
+      if (status === 200 && text) {
+        let parsed;
+        try { parsed = JSON.parse(text); } catch { parsed = null; }
+        if (parsed && parsed.data) {
+          // Parse the HTML table rows from parsed.data
+          const rows = parsed.data || "";
+          // Extract events using regex on the HTML fragment
+          const events = [];
+          const rowRe = /<tr[^>]*class="[^"]*js-event-item[^"]*"[^>]*data-event-datetime="([^"]*)"[^>]*>([\s\S]*?)<\/tr>/g;
+          let m2;
+          while ((m2 = rowRe.exec(rows)) !== null) {
+            const rowHtml = m2[2];
+            const dt = m2[1]; // e.g. "2026/03/09 13:30:00"
+            const cur    = (rowHtml.match(/class="flagCur[^"]*"[^>]*>\s*([A-Z]{3})/)||[])[1] || "";
+            const nameM  = rowHtml.match(/class="event"[^>]*><a[^>]*>([^<]+)<\/a>/);
+            const name   = nameM ? nameM[1].trim() : "";
+            const impM   = rowHtml.match(/class="[^"]*sentiment[^"]*"[^>]*title="([^"]+)"/);
+            const impTxt = impM ? impM[1].toLowerCase() : "";
+            const imp    = impTxt.includes("high") ? "high" : impTxt.includes("moderate") ? "medium" : "low";
+            const actM   = rowHtml.match(/class="[^"]*actual[^"]*"[^>]*>([^<]*)<\/td>/);
+            const fctM   = rowHtml.match(/class="[^"]*forecast[^"]*"[^>]*>([^<]*)<\/td>/);
+            const prvM   = rowHtml.match(/class="[^"]*prev[^"]*"[^>]*>([^<]*)<\/td>/);
+            const clean  = s => s ? s.replace(/<[^>]+>/g,"").trim()||null : null;
+            if (!name || !cur) continue;
+            // Convert datetime: "2026/03/09 13:30:00" -> ISO
+            const isoDate = dt.replace(/\//g,"-").replace(" ","T") + "Z";
+            events.push({
+              date: isoDate, currency: cur, name,
+              impact: imp,
+              actual:   clean(actM ? actM[1] : null),
+              forecast: clean(fctM ? fctM[1] : null),
+              previous: clean(prvM ? prvM[1] : null),
+              source: "investing",
+            });
+          }
+          if (events.length > 0) {
+            console.log(`[CAL] investing.com: ${events.length} events for ${date}`);
+            return json(res, 200, { events: events.sort((a,b)=>a.date.localeCompare(b.date)), source: "investing" });
           }
         }
       }
-    } catch(e) { console.warn("[CAL] Trading Economics failed:", e.message); }
+    } catch(e) { console.warn("[CAL] investing.com failed:", e.message); }
 
-    // ── Source 2: FF CDN (may still work for current/next week) ─────────────
+    // ── Source 2: FF CDN (works for current + next week) ────────────────────
     const ffUrls = [
       "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
       "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
@@ -216,7 +263,7 @@ const server = http.createServer(async (req, res) => {
     ];
     for (const u of ffUrls) {
       try {
-        const { text } = await fetchUrl(u);
+        const { text } = await httpGet(u);
         if (!text || text.includes("DOCTYPE") || text.includes("Request Denied")) continue;
         const arr = JSON.parse(text);
         if (!Array.isArray(arr) || !arr.length) continue;
