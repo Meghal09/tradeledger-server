@@ -379,6 +379,98 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
     }
   }
 
+  // GET /api/quote?symbols=EURUSD,XAUUSD,...  — Yahoo Finance quotes (server-side)
+  if (req.method === "GET" && url.startsWith("/api/quote")) {
+    try {
+      const qs = new URLSearchParams(url.split("?")[1]||"");
+      const raw = (qs.get("symbols")||"").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean).slice(0,30);
+      if (!raw.length) return json(res, 400, { error: "symbols required" });
+
+      const https = require("https");
+
+      // Map TradeLedger symbol → Yahoo Finance ticker
+      const yhMap = {
+        "XAUUSD":"GC=F","XAGUSD":"SI=F","XPTUSD":"PL=F","XPDUSD":"PA=F",
+        "USOIL":"CL=F","UKOIL":"BZ=F","NATGAS":"NG=F",
+        "NAS100":"^IXIC","NASDAQ":"^IXIC","US30":"^DJI","SPX500":"^GSPC",
+        "UK100":"^FTSE","GER40":"^GDAXI","FRA40":"^FCHI","JPN225":"^N225",
+        "AUS200":"^AXJO","HK50":"^HSI","NIFTY50":"^NSEI","DXY":"DX-Y.NYB",
+        "BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","BNBUSD":"BNB-USD",
+        "SOLUSD":"SOL-USD","XRPUSD":"XRP-USD","ADAUSD":"ADA-USD",
+        "DOTUSD":"DOT-USD","LNKUSD":"LINK-USD",
+      };
+
+      // For forex pairs (6-char), use Yahoo =X suffix
+      const toYH = s => {
+        if (yhMap[s]) return yhMap[s];
+        if (s.length === 6) return s + "=X";
+        return s;
+      };
+
+      const tickers = raw.map(toYH).join(",");
+      const path = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
+                   "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose&lang=en-US&region=US";
+
+      const fetchYahoo = () => new Promise((resolve, reject) => {
+        const options = {
+          hostname: "query1.finance.yahoo.com",
+          path,
+          method: "GET",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+          timeout: 10000,
+        };
+        const r = https.request(options, (resp) => {
+          // Follow one redirect
+          if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+            const loc = resp.headers.location;
+            const url2 = new URL(loc);
+            const opts2 = { ...options, hostname: url2.hostname, path: url2.pathname + url2.search };
+            const r2 = https.request(opts2, (resp2) => {
+              let d = ""; resp2.on("data", c => d += c); resp2.on("end", () => resolve(d));
+            });
+            r2.on("error", reject); r2.end(); return;
+          }
+          let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d));
+        });
+        r.on("error", reject);
+        r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+        r.end();
+      });
+
+      const raw2 = await fetchYahoo();
+      const data = JSON.parse(raw2);
+      const results = data?.quoteResponse?.result || [];
+
+      const out = {};
+      for (let i = 0; i < raw.length; i++) {
+        const sym = raw[i];
+        const yh = toYH(sym);
+        const q = results.find(r => r.symbol === yh || r.symbol === sym);
+        if (!q) { out[sym] = null; continue; }
+        const dec = sym.includes("JPY") ? 3 : (["XAUUSD","BTCUSD","ETHUSD","SPX500","US30","NAS100","UK100","GER40","FRA40","JPN225","AUS200","HK50"].includes(sym) ? 2 : 5);
+        const fmt = (v, d) => v != null ? parseFloat(v.toFixed(d)) : null;
+        out[sym] = {
+          price:      fmt(q.regularMarketPrice, dec),
+          change:     fmt(q.regularMarketChange, dec),
+          changePct:  fmt(q.regularMarketChangePercent, 2),
+          high:       fmt(q.regularMarketDayHigh, dec),
+          low:        fmt(q.regularMarketDayLow, dec),
+          prevClose:  fmt(q.regularMarketPreviousClose, dec),
+        };
+      }
+
+      console.log(`[QUOTE] ${Object.keys(out).length} symbols fetched`);
+      return json(res, 200, { quotes: out, fetchedAt: new Date().toISOString() });
+    } catch(e) {
+      console.warn("[QUOTE] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   // GET /api/news  — Yahoo Finance top stories (server-side, no CORS)
   if (req.method === "GET" && url === "/api/news") {
     try {
