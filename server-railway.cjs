@@ -159,6 +159,114 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // GET /api/week-events — fetch Mon-Fri of current week in one call
+  if (req.method === "GET" && url === "/api/week-events") {
+    try {
+      const now = new Date();
+      const day = now.getUTCDay();
+      const mon = new Date(now);
+      mon.setUTCDate(now.getUTCDate() - ((day + 6) % 7));
+      mon.setUTCHours(0, 0, 0, 0);
+
+      // Check if we have a whole-week cache
+      const weekKey = mon.toISOString().slice(0, 10);
+      if (!global._weekCache) global._weekCache = {};
+      if (global._weekCache[weekKey] && (Date.now() - global._weekCache[weekKey].ts) < 3600000) {
+        return json(res, 200, { events: global._weekCache[weekKey].events, source: "cache" });
+      }
+
+      // Try ForexFactory CDN first — get both this week and next week files
+      const https = require("https");
+      const httpGet = (u) => new Promise((resolve, reject) => {
+        const r = https.get(u, { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }, (resp) => {
+          let d = ""; resp.on("data", c => d += c);
+          resp.on("end", () => resolve({ status: resp.statusCode, text: d }));
+        });
+        r.on("error", reject);
+        r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+      });
+
+      const ffUrls = [
+        "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
+        "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+      ];
+
+      let allEvents = [];
+
+      for (const u of ffUrls) {
+        try {
+          const { status, text } = await httpGet(u);
+          if (status !== 200 || !text || text.includes("<!DOCTYPE") || text.includes("Request Denied")) continue;
+          const arr = JSON.parse(text);
+          if (!Array.isArray(arr) || !arr.length) continue;
+          allEvents = arr.map(e => ({
+            date:     e.date || "",
+            currency: e.country || e.currency || "",
+            name:     e.title || e.name || "",
+            impact:   (e.impact || "").toLowerCase(),
+            actual:   (e.actual   != null && e.actual   !== "") ? String(e.actual)   : null,
+            forecast: (e.forecast != null && e.forecast !== "") ? String(e.forecast) : null,
+            previous: (e.previous != null && e.previous !== "") ? String(e.previous) : null,
+            source:   "forexfactory",
+          }));
+          console.log("[WEEK] FF CDN: " + allEvents.length + " events");
+          break;
+        } catch(e) { console.warn("[WEEK] FF failed:", e.message); }
+      }
+
+      // If FF failed or empty, use AI to generate whole week at once
+      if (allEvents.length === 0) {
+        try {
+          const apiKey = process.env.ANTHROPIC_API_KEY || "";
+          const weekStr = weekKey;
+          const prompt = "You are an economic calendar database. Return the forex economic calendar for the full trading week starting Monday " + weekStr + " (Mon-Fri only).\n\nReturn ONLY a valid JSON array. Each object: \"date\": \"YYYY-MM-DDThh:mm:00Z\", \"currency\": 3-letter ISO, \"name\": event name, \"impact\": high/medium/low, \"forecast\": string or null, \"previous\": string or null.\n\nInclude all 5 days, all major currencies, all impact levels. Be realistic.";
+
+          const body = JSON.stringify({
+            model: "claude-haiku-4-5-20251001",
+            max_tokens: 4000,
+            messages: [{ role: "user", content: prompt }]
+          });
+
+          const aiTxt = await new Promise((resolve, reject) => {
+            const r = https.request({
+              hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
+              headers: { "Content-Type": "application/json", "x-api-key": apiKey,
+                "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) }
+            }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
+            r.on("error", reject); r.write(body); r.end();
+          });
+
+          const aiData = JSON.parse(aiTxt);
+          const txt = (aiData.content && aiData.content[0]) ? aiData.content[0].text.trim() : "";
+          const match = txt.match(/\[[\s\S]*\]/);
+          if (match) {
+            const arr = JSON.parse(match[0]);
+            if (Array.isArray(arr)) {
+              allEvents = arr.filter(e => e.currency && e.name).map(e => ({
+                date:     e.date || (weekStr + "T12:00:00Z"),
+                currency: (e.currency || "").toUpperCase(),
+                name:     e.name || "",
+                impact:   (e.impact || "medium").toLowerCase(),
+                actual:   null,
+                forecast: e.forecast ? String(e.forecast) : null,
+                previous: e.previous ? String(e.previous) : null,
+                source:   "AI",
+              }));
+              console.log("[WEEK] AI: " + allEvents.length + " events");
+            }
+          }
+        } catch(e) { console.warn("[WEEK] AI failed:", e.message); }
+      }
+
+      allEvents.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+      global._weekCache[weekKey] = { events: allEvents, ts: Date.now() };
+      return json(res, 200, { events: allEvents, source: allEvents[0]?.source || "none" });
+    } catch(e) {
+      console.warn("[WEEK] Error:", e.message);
+      return json(res, 200, { events: [], source: "error" });
+    }
+  }
+
   // GET /api/calendar?date=YYYY-MM-DD
   // FF CDN (live, this/next week) → Claude AI (any date, cached in-memory)
   if (req.method === "GET" && url === "/api/calendar") {
@@ -511,7 +619,30 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
       });
 
       const { html, status } = await fetchPage(articleUrl);
-      if (!html || html.length < 200) return json(res, 422, { error: "Empty page" });
+      if (!html || html.length < 200) return json(res, 422, { error: "Article could not be loaded" });
+
+      // Detect paywalls / bot protection — check first 5000 chars
+      const htmlStart = html.slice(0, 5000);
+      const htmlLower = htmlStart.toLowerCase();
+      const blockers = [
+        "enable js","disable any ad blocker","captcha-delivery","please enable javascript",
+        "403 forbidden","access denied","cf-browser-verification","__cf_bm","datadome",
+        "subscribe to read","subscription required","subscriber-only","sign in to read",
+        "create account to continue","geo.captcha","dd={'rt'","cid':'AH","bot protection",
+        "paywall","metered-content","piano-paywall","tp-modal","tp-container",
+        "you've used","free articles","free article","article limit","register to read",
+        "already a subscriber","log in to read"
+      ];
+      // Also block if body is suspiciously short (blocked pages are tiny)
+      const blocked = blockers.some(b => htmlLower.includes(b)) || (html.length < 2000 && status === 200);
+      if (blocked) {
+        return json(res, 200, {
+          title: "", description: "", image: "", blocks: [],
+          source: new URL(articleUrl).hostname,
+          paywalled: true,
+          error: null
+        });
+      }
 
       // Extract title
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
