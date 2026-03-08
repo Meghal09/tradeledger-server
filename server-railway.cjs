@@ -24,10 +24,16 @@ const APP_TOKEN = getToken();
 
 // ─── In-memory trades + optional file persistence ────────────────────────────
 let trades = [];
-const DATA_FILE = path.join(__dirname, "trades.json");
-try { trades = JSON.parse(fs.readFileSync(DATA_FILE, "utf8")); } catch {}
+// Use /data volume if mounted (Railway persistent volume), else fallback to local
+const DATA_DIR  = fs.existsSync("/data") ? "/data" : __dirname;
+const DATA_FILE = path.join(DATA_DIR, "trades.json");
+try {
+  const raw = fs.readFileSync(DATA_FILE, "utf8");
+  trades = JSON.parse(raw);
+  console.log(`[BOOT] Loaded ${trades.length} trades from ${DATA_FILE}`);
+} catch { console.log("[BOOT] No existing trades file, starting fresh"); }
 function saveTrades() {
-  try { fs.writeFileSync(DATA_FILE, JSON.stringify(trades, null, 2)); } catch {}
+  try { fs.writeFileSync(DATA_FILE, JSON.stringify(trades)); } catch(e) { console.warn("[SAVE] Failed:", e.message); }
 }
 
 // ─── WebSocket clients ────────────────────────────────────────────────────────
