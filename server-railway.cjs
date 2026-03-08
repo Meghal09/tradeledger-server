@@ -471,7 +471,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // GET /api/quote-debug — test all price sources with EURUSD
+  // GET /api/quote-debug — test all price sources
   if (req.method === "GET" && url === "/api/quote-debug") {
     const https = require("https");
     const httpsGet = (host, path, hdrs={}) => new Promise((resolve, reject) => {
@@ -480,24 +480,37 @@ const server = http.createServer(async (req, res) => {
       }, (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve({d,status:resp.statusCode})); });
       r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));}); r.end();
     });
-    const results = {};
+    const TD_KEY = process.env.TWELVE_DATA_KEY || "";
+    const results = { twelve_data_key_set: !!TD_KEY, key_preview: TD_KEY ? TD_KEY.slice(0,8)+"..." : "NOT SET" };
     try {
-      const ff = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=EUR,GBP,JPY");
-      results.frankfurter = { status: ff.status, ok: ff.status===200, sample: ff.d.slice(0,120) };
+      const td = await httpsGet("api.twelvedata.com",
+        "/price?symbol=EUR%2FUSD,XAU%2FUSD,BTC%2FUSD,NDX,WTI&apikey=" + TD_KEY + "&dp=5");
+      const parsed = td.status===200 ? JSON.parse(td.d) : {};
+      results.twelve_data = {
+        status: td.status, ok: td.status===200 && !parsed.code,
+        eurusd: parsed["EUR/USD"]?.price || "missing",
+        xauusd: parsed["XAU/USD"]?.price || "missing",
+        btcusd: parsed["BTC/USD"]?.price || "missing",
+        nas100: parsed["NDX"]?.price     || "missing",
+        wti:    parsed["WTI"]?.price     || "missing",
+        error:  parsed.message || parsed.code || null,
+      };
+    } catch(e) { results.twelve_data = { error: e.message }; }
+    try {
+      const ff = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=EUR,GBP,JPY,XAU");
+      results.frankfurter = { status: ff.status, ok: ff.status===200, sample: ff.d.slice(0,150) };
     } catch(e) { results.frankfurter = { error: e.message }; }
     try {
-      const cg = await httpsGet("api.coingecko.com", "/api/v3/simple/price?ids=bitcoin&vs_currencies=usd");
-      results.coingecko = { status: cg.status, ok: cg.status===200, sample: cg.d.slice(0,80) };
+      const cg = await httpsGet("api.coingecko.com", "/api/v3/simple/price?ids=bitcoin,ethereum&vs_currencies=usd");
+      results.coingecko = { status: cg.status, ok: cg.status===200, sample: cg.d.slice(0,100) };
     } catch(e) { results.coingecko = { error: e.message }; }
-    try {
-      const yh = await httpsGet("query1.finance.yahoo.com", "/v8/finance/quote?symbols=EURUSD%3DX&fields=regularMarketPrice", { "Cookie": "B=1", "Referer": "https://finance.yahoo.com/" });
-      results.yahoo = { status: yh.status, ok: yh.status===200 && yh.d.includes("regularMarketPrice"), sample: yh.d.slice(0,120) };
-    } catch(e) { results.yahoo = { error: e.message }; }
-    return json(res, 200, results);
+    return json(res, 200, { results, timestamp: new Date().toISOString() });
   }
 
   // GET /api/quote?symbols=EURUSD,XAUUSD,...
-  // Sources: 1) Frankfurter (forex ECB) 2) Coingecko (crypto) 3) Yahoo Finance (best-effort)
+  // Sources: 1) Twelve Data (primary — forex, metals, crypto, indices, energy)
+  //          2) CoinGecko (crypto fallback — free, no key)
+  //          3) Frankfurter (forex/metals fallback — ECB, free)
   if (req.method === "GET" && url.startsWith("/api/quote")) {
     try {
       const qs = new URLSearchParams(fullUrl.split("?")[1]||"");
@@ -505,8 +518,9 @@ const server = http.createServer(async (req, res) => {
       if (!raw.length) return json(res, 400, { error: "symbols required" });
 
       const https = require("https");
+      const TD_KEY = process.env.TWELVE_DATA_KEY || "";
 
-      // ── helpers ──────────────────────────────────────────────────────────
+      // ── shared httpsGet helper ──────────────────────────────────────────
       const httpsGet = (host, path, hdrs={}, timeout=10000) => new Promise((resolve, reject) => {
         const opts = {
           hostname: host, path, method: "GET", timeout,
@@ -530,132 +544,124 @@ const server = http.createServer(async (req, res) => {
       // decimal places per symbol
       const getDec = sym => sym.includes("JPY") ? 3
         : ["XAUUSD","XAGUSD","BTCUSD","ETHUSD","BNBUSD","SOLUSD","SPX500","US30","NAS100",
-           "UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50","USOIL","UKOIL"].includes(sym) ? 2 : 5;
+           "UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50","USOIL","UKOIL","NATGAS"].includes(sym) ? 2 : 5;
       const fmt = (v, dec) => v != null && !isNaN(v) ? parseFloat(parseFloat(v).toFixed(dec)) : null;
 
-      // classify symbols
-      const CRYPTO_SYMS  = ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LNKUSD"];
-      const METALS_SYMS  = ["XAUUSD","XAGUSD","XPTUSD","XPDUSD"];
-      const INDICES_SYMS = ["NAS100","NASDAQ","US30","SPX500","UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50","DXY"];
-      const ENERGY_SYMS  = ["USOIL","UKOIL","NATGAS"];
-      const isForex = s => !CRYPTO_SYMS.includes(s) && !METALS_SYMS.includes(s) && !INDICES_SYMS.includes(s) && !ENERGY_SYMS.includes(s);
+      // Twelve Data symbol mapping — their format vs our MT5 symbols
+      const TD_MAP = {
+        // Forex — Twelve Data uses EUR/USD format
+        "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
+        "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","EURGBP":"EUR/GBP",
+        "EURJPY":"EUR/JPY","GBPJPY":"GBP/JPY","EURCHF":"EUR/CHF","AUDJPY":"AUD/JPY",
+        "CADJPY":"CAD/JPY","CHFJPY":"CHF/JPY","GBPCHF":"GBP/CHF","EURCAD":"EUR/CAD",
+        "AUDCAD":"AUD/CAD","AUDNZD":"AUD/NZD","NZDJPY":"NZD/JPY","GBPCAD":"GBP/CAD",
+        "GBPNZD":"GBP/NZD","GBPAUD":"GBP/AUD","EURAUD":"EUR/AUD","EURNZD":"EUR/NZD",
+        "CADCHF":"CAD/CHF","NZDCAD":"NZD/CAD","NZDCHF":"NZD/CHF","AUDCHF":"AUD/CHF",
+        "USDMXN":"USD/MXN","USDZAR":"USD/ZAR","USDNOK":"USD/NOK","USDSEK":"USD/SEK",
+        "USDDKK":"USD/DKK","USDPLN":"USD/PLN","USDTRY":"USD/TRY","USDSGD":"USD/SGD",
+        "USDHKD":"USD/HKD","USDCNH":"USD/CNH","DXY":"DX-Y.NYB",
+        // Metals
+        "XAUUSD":"XAU/USD","XAGUSD":"XAG/USD","XPTUSD":"XPT/USD","XPDUSD":"XPD/USD",
+        // Crypto (Twelve Data supports these directly)
+        "BTCUSD":"BTC/USD","ETHUSD":"ETH/USD","BNBUSD":"BNB/USD","SOLUSD":"SOL/USD",
+        "XRPUSD":"XRP/USD","ADAUSD":"ADA/USD","DOTUSD":"DOT/USD","LNKUSD":"LINK/USD",
+        // Indices — Twelve Data uses these tickers
+        "NAS100":"NDX","SPX500":"SPX","US30":"DJI","UK100":"UKX","GER40":"DAX",
+        "FRA40":"CAC40","JPN225":"N225","AUS200":"AS51","HK50":"HSI",
+        // Energy
+        "USOIL":"WTI","UKOIL":"BRENT","NATGAS":"NGAS",
+      };
 
       const out = {};
       raw.forEach(s => { out[s] = null; });
 
-      // ── SOURCE 1: Frankfurter (ECB forex rates) — always reliable ─────────
-      const forexSyms = raw.filter(isForex);
-      if (forexSyms.length) {
+      // ── SOURCE 1: Twelve Data (primary for everything) ────────────────────
+      if (TD_KEY) {
         try {
-          // Build a set of unique base currencies needed
-          const bases = [...new Set(forexSyms.map(s => s.slice(0,3)))];
-          const quoteCs = [...new Set(forexSyms.map(s => s.slice(3,6)))];
-          const allCurrencies = [...new Set([...bases, ...quoteCs])].filter(c => c !== "USD").join(",");
+          // Map our symbols to Twelve Data symbols
+          const tdSymbols = raw.map(s => TD_MAP[s]).filter(Boolean);
+          const tdByOurs  = {}; // TD symbol → our symbol
+          raw.forEach(s => { if (TD_MAP[s]) tdByOurs[TD_MAP[s]] = s; });
 
-          // Fetch latest rates (base USD, get everything)
-          const ffResp = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=" + allCurrencies, {});
-          if (ffResp.status === 200) {
-            const ffData = JSON.parse(ffResp.text);
-            const rates = { USD: 1, ...ffData.rates }; // rates vs USD
+          if (tdSymbols.length) {
+            // Twelve Data /price endpoint — batch up to 120 symbols
+            const tdPath = "/price?symbol=" + encodeURIComponent(tdSymbols.join(",")) +
+              "&apikey=" + TD_KEY + "&dp=5";
 
-            // Also get yesterday for prevClose
-            const yesterday = new Date(); yesterday.setDate(yesterday.getDate()-1);
-            if (yesterday.getDay() === 0) yesterday.setDate(yesterday.getDate()-2); // skip Sunday
-            if (yesterday.getDay() === 6) yesterday.setDate(yesterday.getDate()-1); // skip Saturday
-            const yStr = yesterday.toISOString().slice(0,10);
-            let prevRates = { USD: 1 };
-            try {
-              const prevResp = await httpsGet("api.frankfurter.app", "/" + yStr + "?from=USD&to=" + allCurrencies, {});
-              if (prevResp.status === 200) { const pd = JSON.parse(prevResp.text); prevRates = { USD: 1, ...pd.rates }; }
-            } catch(e) {}
+            const tdResp = await httpsGet("api.twelvedata.com", tdPath, {}, 12000);
+            if (tdResp.status === 200) {
+              const tdData = JSON.parse(tdResp.text);
 
-            forexSyms.forEach(sym => {
-              const base = sym.slice(0,3), quote = sym.slice(3,6);
-              // Convert: base/quote = (USD/quote) / (USD/base) = rates[quote] / rates[base]
-              const baseRate = rates[base] || null;
-              const quoteRate = rates[quote] || null;
-              if (!baseRate || !quoteRate) return;
-              const price = quoteRate / baseRate;
-              const prevBase = prevRates[base] || baseRate;
-              const prevQuote = prevRates[quote] || quoteRate;
-              const prevClose = prevQuote / prevBase;
-              const change = price - prevClose;
-              const changePct = (change / prevClose) * 100;
-              const dec = getDec(sym);
-              out[sym] = {
-                price:     fmt(price, dec),
-                change:    fmt(change, dec),
-                changePct: fmt(changePct, 2),
-                high:      null, // ECB doesn't provide intraday H/L
-                low:       null,
-                prevClose: fmt(prevClose, dec),
-              };
-            });
-            console.log("[QUOTE] Frankfurter ok:", forexSyms.filter(s=>out[s]).length, "forex pairs");
-          }
-        } catch(e) { console.warn("[QUOTE] Frankfurter failed:", e.message); }
-      }
-
-      // ── SOURCE 1b: Frankfurter metals (XAU, XAG via ECB) ────────────────────
-      const metalSyms = raw.filter(s => METALS_SYMS.includes(s));
-      if (metalSyms.length) {
-        try {
-          // Frankfurter supports XAU (gold) and XAG (silver) as base currencies
-          const metResp = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=XAU,XAG", {});
-          if (metResp.status === 200) {
-            const metData = JSON.parse(metResp.text);
-            const rates = metData.rates || {}; // rates[XAU] = how much XAU per 1 USD
-            // price of 1 XAU in USD = 1 / rates.XAU
-            const xauUsd = rates.XAU ? 1 / rates.XAU : null;
-            const xagUsd = rates.XAG ? 1 / rates.XAG : null;
-            if (xauUsd && out["XAUUSD"] === null) {
-              // Get prev day for change calculation
-              const yesterday = new Date(); yesterday.setDate(yesterday.getDate()-1);
-              if (yesterday.getDay()===0) yesterday.setDate(yesterday.getDate()-2);
-              if (yesterday.getDay()===6) yesterday.setDate(yesterday.getDate()-1);
-              const yStr = yesterday.toISOString().slice(0,10);
-              let prevXau = xauUsd;
+              // Also fetch quote (has open, high, low, prev_close, change)
+              const tdQPath = "/quote?symbol=" + encodeURIComponent(tdSymbols.join(",")) +
+                "&apikey=" + TD_KEY + "&dp=5";
+              let quoteData = {};
               try {
-                const prevResp = await httpsGet("api.frankfurter.app", "/" + yStr + "?from=USD&to=XAU", {});
-                if (prevResp.status === 200) {
-                  const pd = JSON.parse(prevResp.text);
-                  if (pd.rates?.XAU) prevXau = 1 / pd.rates.XAU;
-                }
+                const tdQResp = await httpsGet("api.twelvedata.com", tdQPath, {}, 12000);
+                if (tdQResp.status === 200) quoteData = JSON.parse(tdQResp.text);
               } catch(e) {}
-              const change = xauUsd - prevXau;
-              const changePct = (change / prevXau) * 100;
-              out["XAUUSD"] = { price: fmt(xauUsd,2), change: fmt(change,2), changePct: fmt(changePct,2), high: null, low: null, prevClose: fmt(prevXau,2) };
-              console.log("[QUOTE] Frankfurter XAU/USD:", xauUsd.toFixed(2));
-            }
-            if (xagUsd && out["XAGUSD"] === null) {
-              out["XAGUSD"] = { price: fmt(xagUsd,2), change: null, changePct: null, high: null, low: null, prevClose: null };
+
+              // For single symbol, Twelve Data returns object directly
+              // For multiple, it returns { SYMBOL: {...}, SYMBOL2: {...} }
+              const isSingle = tdSymbols.length === 1;
+              const priceMap  = isSingle ? { [tdSymbols[0]]: tdData } : tdData;
+              const quoteMap  = isSingle ? { [tdSymbols[0]]: quoteData } : quoteData;
+
+              tdSymbols.forEach(tdSym => {
+                const ourSym = tdByOurs[tdSym];
+                if (!ourSym) return;
+                const pEntry = priceMap[tdSym] || priceMap[tdSym.replace("/","")] || null;
+                const qEntry = quoteMap[tdSym] || quoteMap[tdSym.replace("/","")] || null;
+                const price = pEntry?.price ? parseFloat(pEntry.price) : null;
+                if (!price || price <= 0) return;
+                const dec = getDec(ourSym);
+                const open      = qEntry?.open      ? parseFloat(qEntry.open)       : null;
+                const high      = qEntry?.high      ? parseFloat(qEntry.high)       : null;
+                const low       = qEntry?.low       ? parseFloat(qEntry.low)        : null;
+                const prevClose = qEntry?.previous_close ? parseFloat(qEntry.previous_close) : null;
+                const change    = prevClose ? price - prevClose : null;
+                const changePct = prevClose && change ? (change / prevClose) * 100 : null;
+                out[ourSym] = {
+                  price:     fmt(price, dec),
+                  change:    fmt(change, dec),
+                  changePct: fmt(changePct, 2),
+                  high:      fmt(high, dec),
+                  low:       fmt(low, dec),
+                  prevClose: fmt(prevClose, dec),
+                };
+              });
+              const tdFilled = raw.filter(s=>out[s]!==null).length;
+              console.log("[QUOTE] TwelveData ok:", tdFilled, "/", raw.length, "symbols");
+            } else {
+              console.warn("[QUOTE] TwelveData status:", tdResp.status, tdResp.text.slice(0,120));
             }
           }
-        } catch(e) { console.warn("[QUOTE] Frankfurter metals failed:", e.message); }
+        } catch(e) { console.warn("[QUOTE] TwelveData failed:", e.message); }
+      } else {
+        console.warn("[QUOTE] No TWELVE_DATA_KEY env var set — skipping primary source");
       }
 
-      // ── SOURCE 2: CoinGecko (crypto) — free, no key ───────────────────────
-      const cryptoSyms = raw.filter(s => CRYPTO_SYMS.includes(s));
-      if (cryptoSyms.length) {
+      // ── SOURCE 2: CoinGecko (crypto fallback — free, no key needed) ──────
+      const cryptoStillNeeded = raw.filter(s => out[s]===null &&
+        ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LNKUSD"].includes(s));
+      if (cryptoStillNeeded.length) {
         try {
           const cgMap = {
             "BTCUSD":"bitcoin","ETHUSD":"ethereum","BNBUSD":"binancecoin",
             "SOLUSD":"solana","XRPUSD":"ripple","ADAUSD":"cardano",
             "DOTUSD":"polkadot","LNKUSD":"chainlink"
           };
-          const ids = cryptoSyms.map(s => cgMap[s]).filter(Boolean).join(",");
+          const ids = cryptoStillNeeded.map(s=>cgMap[s]).filter(Boolean).join(",");
           if (ids) {
             const cgResp = await httpsGet("api.coingecko.com",
-              "/api/v3/coins/markets?vs_currency=usd&ids=" + ids + "&price_change_percentage=24h", {
-              "Accept": "application/json"
-            });
+              "/api/v3/coins/markets?vs_currency=usd&ids=" + ids + "&price_change_percentage=24h",
+              { "Accept": "application/json" });
             if (cgResp.status === 200) {
               const cgData = JSON.parse(cgResp.text);
               const cgById = {};
               cgData.forEach(c => { cgById[c.id] = c; });
-              cryptoSyms.forEach(sym => {
-                const id = cgMap[sym];
-                const c = cgById[id];
+              cryptoStillNeeded.forEach(sym => {
+                const c = cgById[cgMap[sym]];
                 if (!c) return;
                 const dec = getDec(sym);
                 out[sym] = {
@@ -667,78 +673,57 @@ const server = http.createServer(async (req, res) => {
                   prevClose: fmt(c.current_price - c.price_change_24h, dec),
                 };
               });
-              console.log("[QUOTE] CoinGecko ok:", cryptoSyms.filter(s=>out[s]).length, "crypto");
+              console.log("[QUOTE] CoinGecko fallback:", cryptoStillNeeded.filter(s=>out[s]).length, "crypto");
             }
           }
-        } catch(e) { console.warn("[QUOTE] CoinGecko failed:", e.message); }
+        } catch(e) { console.warn("[QUOTE] CoinGecko fallback failed:", e.message); }
       }
 
-      // ── SOURCE 3: Yahoo Finance (metals, indices, energy + forex fallback) ─
-      const yhNeeded = raw.filter(s => out[s] === null);
-      if (yhNeeded.length) {
+      // ── SOURCE 3: Frankfurter (forex + metals fallback — ECB, always reliable) ─
+      const ffStillNeeded = raw.filter(s => out[s]===null);
+      if (ffStillNeeded.length) {
         try {
-          const yhMap = {
-            "XAUUSD":"GC=F","XAGUSD":"SI=F","XPTUSD":"PL=F","XPDUSD":"PA=F",
-            "USOIL":"CL=F","UKOIL":"BZ=F","NATGAS":"NG=F",
-            "NAS100":"^IXIC","NASDAQ":"^IXIC","US30":"^DJI","SPX500":"^GSPC",
-            "UK100":"^FTSE","GER40":"^GDAXI","FRA40":"^FCHI","JPN225":"^N225",
-            "AUS200":"^AXJO","HK50":"^HSI","NIFTY50":"^NSEI","DXY":"DX-Y.NYB",
-          };
-          const toYH = s => yhMap[s] || (s.length===6 ? s+"=X" : s);
-          const tickers = yhNeeded.map(toYH).join(",");
-
-          // Step 1: get cookies + crumb from Yahoo
-          let cookie = "";
-          let crumb = "";
-          try {
-            const consent = await httpsGet("finance.yahoo.com", "/", {
-              "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-            }, 8000);
-            cookie = (consent.headers["set-cookie"] || []).map(c => c.split(";")[0]).join("; ");
-            // Get crumb
-            const crumbResp = await httpsGet("query2.finance.yahoo.com", "/v1/test/getcrumb", {
-              "Cookie": cookie, "Referer": "https://finance.yahoo.com/"
-            }, 5000);
-            if (crumbResp.status === 200 && crumbResp.text && crumbResp.text.length < 20) {
-              crumb = crumbResp.text.trim();
+          // Forex pairs
+          const ffForex  = ffStillNeeded.filter(s => s.length===6 && !s.startsWith("XA") && !s.startsWith("XP"));
+          const ffMetals = ffStillNeeded.filter(s => ["XAUUSD","XAGUSD"].includes(s));
+          const ffAll    = [...new Set([...ffForex.map(s=>s.slice(0,3)), ...ffForex.map(s=>s.slice(3,6)),
+                                        ...ffMetals.map(()=>["XAU","XAG"]).flat()])].filter(c=>c!=="USD").join(",");
+          if (ffAll) {
+            const ffResp = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=" + ffAll, {});
+            if (ffResp.status === 200) {
+              const rates = { USD: 1, ...JSON.parse(ffResp.text).rates };
+              // Get yesterday for prevClose
+              const yd = new Date(); yd.setDate(yd.getDate()-1);
+              if (yd.getDay()===0) yd.setDate(yd.getDate()-2);
+              if (yd.getDay()===6) yd.setDate(yd.getDate()-1);
+              let prevRates = { USD: 1 };
+              try {
+                const pr = await httpsGet("api.frankfurter.app", "/" + yd.toISOString().slice(0,10) + "?from=USD&to=" + ffAll, {});
+                if (pr.status===200) prevRates = { USD:1, ...JSON.parse(pr.text).rates };
+              } catch(e) {}
+              ffForex.forEach(sym => {
+                const base=sym.slice(0,3), quote=sym.slice(3,6);
+                const bR=rates[base],qR=rates[quote];
+                if (!bR||!qR) return;
+                const price=qR/bR, prev=(prevRates[quote]||qR)/(prevRates[base]||bR);
+                const dec=getDec(sym);
+                out[sym]={ price:fmt(price,dec),change:fmt(price-prev,dec),changePct:fmt((price-prev)/prev*100,2),high:null,low:null,prevClose:fmt(prev,dec) };
+              });
+              ["XAUUSD","XAGUSD"].forEach(sym => {
+                if (!ffStillNeeded.includes(sym)) return;
+                const key=sym==="XAUUSD"?"XAU":"XAG", r=rates[key];
+                if (!r) return;
+                const price=1/r, prev=prevRates[key]?1/prevRates[key]:price;
+                out[sym]={ price:fmt(price,2),change:fmt(price-prev,2),changePct:fmt((price-prev)/prev*100,2),high:null,low:null,prevClose:fmt(prev,2) };
+              });
+              console.log("[QUOTE] Frankfurter fallback:", ffStillNeeded.filter(s=>out[s]).length, "symbols");
             }
-          } catch(e) { console.warn("[QUOTE] Yahoo crumb failed:", e.message); }
-
-          const crumbParam = crumb ? "&crumb=" + encodeURIComponent(crumb) : "";
-          const quotePath = "/v8/finance/quote?symbols=" + encodeURIComponent(tickers) +
-            "&fields=regularMarketPrice,regularMarketChange,regularMarketChangePercent,regularMarketDayHigh,regularMarketDayLow,regularMarketPreviousClose" + crumbParam;
-
-          const yhResp = await httpsGet("query1.finance.yahoo.com", quotePath, {
-            "Cookie": cookie || "B=1",
-            "Referer": "https://finance.yahoo.com/",
-          });
-
-          if (yhResp.status === 200 && yhResp.text.includes("regularMarketPrice")) {
-            const yhData = JSON.parse(yhResp.text);
-            const results = yhData?.quoteResponse?.result || [];
-            yhNeeded.forEach(sym => {
-              const yh = toYH(sym);
-              const q = results.find(r => r.symbol === yh || r.symbol === sym);
-              if (!q) return;
-              const dec = getDec(sym);
-              out[sym] = {
-                price:     fmt(q.regularMarketPrice, dec),
-                change:    fmt(q.regularMarketChange, dec),
-                changePct: fmt(q.regularMarketChangePercent, 2),
-                high:      fmt(q.regularMarketDayHigh, dec),
-                low:       fmt(q.regularMarketDayLow, dec),
-                prevClose: fmt(q.regularMarketPreviousClose, dec),
-              };
-            });
-            console.log("[QUOTE] Yahoo ok:", yhNeeded.filter(s=>out[s]).length, "symbols");
-          } else {
-            console.warn("[QUOTE] Yahoo returned status", yhResp.status, yhResp.text.slice(0,80));
           }
-        } catch(e) { console.warn("[QUOTE] Yahoo failed:", e.message); }
+        } catch(e) { console.warn("[QUOTE] Frankfurter fallback failed:", e.message); }
       }
 
       const filled = raw.filter(s => out[s] !== null).length;
-      console.log(`[QUOTE] Done: ${filled}/${raw.length} symbols`);
+      console.log(`[QUOTE] Final: ${filled}/${raw.length} symbols filled`);
       return json(res, 200, { quotes: out, fetchedAt: new Date().toISOString() });
     } catch(e) {
       console.warn("[QUOTE] Error:", e.message);
@@ -956,46 +941,98 @@ const server = http.createServer(async (req, res) => {
         r.end();
       });
 
-      const livePrices = {}; // symbol -> {price, change24h, changeP}
+      const livePrices = {}; // symbol -> {price, changeP}
+      const TD_KEY = process.env.TWELVE_DATA_KEY || "";
 
-      // Fetch crypto via CoinGecko
-      const cryptoSyms = rawSyms.filter(s=>ASSET_META[s]?.cgId);
+      // Twelve Data symbol map (same as quote endpoint)
+      const TD_SYM_MAP = {
+        "XAUUSD":"XAU/USD","XAGUSD":"XAG/USD","BTCUSD":"BTC/USD","ETHUSD":"ETH/USD",
+        "BNBUSD":"BNB/USD","SOLUSD":"SOL/USD","XRPUSD":"XRP/USD",
+        "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","GBPJPY":"GBP/JPY",
+        "AUDUSD":"AUD/USD","USDCHF":"USD/CHF","USDCAD":"USD/CAD","NZDUSD":"NZD/USD",
+        "NAS100":"NDX","SPX500":"SPX","US30":"DJI","USOIL":"WTI",
+      };
+
+      // ── PRIMARY: Twelve Data (covers everything in one call) ─────────────
+      if (TD_KEY) {
+        try {
+          const tdSyms = rawSyms.map(s=>TD_SYM_MAP[s]).filter(Boolean);
+          const tdBack = {}; // TD sym → our sym
+          rawSyms.forEach(s=>{ if (TD_SYM_MAP[s]) tdBack[TD_SYM_MAP[s]]=s; });
+          if (tdSyms.length) {
+            const tdResp = await httpsGetSimple("api.twelvedata.com",
+              "/price?symbol=" + encodeURIComponent(tdSyms.join(",")) + "&apikey=" + TD_KEY + "&dp=5");
+            if (tdResp.status===200) {
+              const tdData = JSON.parse(tdResp.text);
+              const isSingle = tdSyms.length===1;
+              const priceMap = isSingle ? { [tdSyms[0]]: tdData } : tdData;
+              tdSyms.forEach(ts => {
+                const ourSym = tdBack[ts];
+                if (!ourSym) return;
+                const price = parseFloat(priceMap[ts]?.price);
+                if (!price || isNaN(price)) return;
+                livePrices[ourSym] = { price, changeP: 0 };
+              });
+            }
+            // Also grab 24h change from /quote
+            try {
+              const tqResp = await httpsGetSimple("api.twelvedata.com",
+                "/quote?symbol=" + encodeURIComponent(tdSyms.join(",")) + "&apikey=" + TD_KEY + "&dp=5");
+              if (tqResp.status===200) {
+                const tqData = JSON.parse(tqResp.text);
+                const isSingle = tdSyms.length===1;
+                const qMap = isSingle ? { [tdSyms[0]]: tqData } : tqData;
+                tdSyms.forEach(ts=>{
+                  const ourSym=tdBack[ts];
+                  if (!ourSym||!livePrices[ourSym]) return;
+                  const q=qMap[ts];
+                  if (!q) return;
+                  const prev=parseFloat(q.previous_close);
+                  const price=livePrices[ourSym].price;
+                  if (prev&&prev>0) livePrices[ourSym].changeP=+((price-prev)/prev*100).toFixed(2);
+                });
+              }
+            } catch(e) {}
+            console.log("[PRED] TwelveData prices:", rawSyms.filter(s=>livePrices[s]).join(","));
+          }
+        } catch(e) { console.warn("[PRED] TwelveData failed:", e.message); }
+      }
+
+      // ── FALLBACK: CoinGecko (crypto only, if TD missed any) ──────────────
+      const cryptoSyms = rawSyms.filter(s=>ASSET_META[s]?.cgId && !livePrices[s]);
       if (cryptoSyms.length) {
         try {
           const ids = cryptoSyms.map(s=>ASSET_META[s].cgId).join(",");
-          const cgResp = await httpsGetSimple("api.coingecko.com", "/api/v3/simple/price?ids="+ids+"&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true");
+          const cgResp = await httpsGetSimple("api.coingecko.com",
+            "/api/v3/simple/price?ids="+ids+"&vs_currencies=usd&include_24hr_change=true");
           if (cgResp.status===200) {
             const cgData = JSON.parse(cgResp.text);
             cryptoSyms.forEach(s=>{
-              const id = ASSET_META[s].cgId;
-              const d = cgData[id];
-              if (d?.usd) livePrices[s] = {price:d.usd, changeP:+(d.usd_24h_change||0).toFixed(2)};
+              const id=ASSET_META[s].cgId, d=cgData[id];
+              if (d?.usd) livePrices[s]={price:d.usd,changeP:+(d.usd_24h_change||0).toFixed(2)};
             });
-            console.log("[PRED] CoinGecko prices:", Object.keys(livePrices));
+            console.log("[PRED] CoinGecko fallback:", cryptoSyms.filter(s=>livePrices[s]).join(","));
           }
-        } catch(e) { console.warn("[PRED] CoinGecko failed:", e.message); }
+        } catch(e) { console.warn("[PRED] CoinGecko fallback failed:", e.message); }
       }
 
-      // Fetch metals + forex via Frankfurter (ECB)
-      const metalForexSyms = rawSyms.filter(s=>ASSET_META[s]?.ffBase||ASSET_META[s]?.ffPair);
+      // ── FALLBACK: Frankfurter (forex/metals if still missing) ────────────
+      const metalForexSyms = rawSyms.filter(s=>!livePrices[s]&&(ASSET_META[s]?.ffBase||ASSET_META[s]?.ffPair));
       if (metalForexSyms.length) {
         try {
-          // Collect all currencies needed
-          const currencies = [...new Set(metalForexSyms.map(s=>ASSET_META[s]?.ffBase||ASSET_META[s]?.ffPair).filter(Boolean))];
-          const ffResp = await httpsGetSimple("api.frankfurter.app", "/latest?from=USD&to="+currencies.join(","));
+          const currencies=[...new Set(metalForexSyms.map(s=>ASSET_META[s]?.ffBase||ASSET_META[s]?.ffPair).filter(Boolean))];
+          const ffResp=await httpsGetSimple("api.frankfurter.app","/latest?from=USD&to="+currencies.join(","));
           if (ffResp.status===200) {
-            const ffData = JSON.parse(ffResp.text);
-            const rates = ffData.rates||{};
+            const rates=JSON.parse(ffResp.text).rates||{};
             metalForexSyms.forEach(s=>{
-              const m = ASSET_META[s];
-              const code = m?.ffBase||m?.ffPair;
+              const m=ASSET_META[s], code=m?.ffBase||m?.ffPair;
               if (!code||!rates[code]) return;
-              const price = m?.invert ? rates[code] : (1/rates[code]);
-              livePrices[s] = {price:+price.toFixed(m?.ffBase?2:5), changeP:0};
+              const price=m?.invert?rates[code]:(m?.ffBase?1/rates[code]:1/rates[code]);
+              livePrices[s]={price:+price.toFixed(m?.ffBase?2:5),changeP:0};
             });
-            console.log("[PRED] Frankfurter prices:", metalForexSyms.filter(s=>livePrices[s]));
+            console.log("[PRED] Frankfurter fallback:", metalForexSyms.filter(s=>livePrices[s]).join(","));
           }
-        } catch(e) { console.warn("[PRED] Frankfurter failed:", e.message); }
+        } catch(e) { console.warn("[PRED] Frankfurter fallback failed:", e.message); }
       }
 
       // ── STEP 2: Build prompt with REAL prices injected ───────────────────
