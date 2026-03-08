@@ -152,28 +152,21 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // GET /api/calendar?date=YYYY-MM-DD  — server-side FF fetch + AI fallback
+  // GET /api/calendar?date=YYYY-MM-DD  — Trading Economics + fallbacks
   if (req.method === "GET" && url === "/api/calendar") {
     const qs   = new URL(req.url, "http://x").searchParams;
     const date = qs.get("date");
     if (!date) return json(res, 400, { error: "date param required" });
 
     const https = require("https");
-    const fetchUrl = (u) => new Promise((resolve, reject) => {
-      const r = https.get(u, { headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }, timeout: 6000 }, (resp) => {
-        let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d));
+    const fetchUrl = (u, opts) => new Promise((resolve, reject) => {
+      const options = Object.assign({ headers: { "User-Agent": "Mozilla/5.0", "Accept": "application/json" }, timeout: 8000 }, opts || {});
+      const r = https.get(u, options, (resp) => {
+        let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve({ status: resp.statusCode, text: d }));
       });
       r.on("error", reject);
       r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
     });
-
-    const normalise = (arr) => arr.map(e => ({
-      date: e.date || "", currency: e.country || e.currency || "",
-      name: e.title || e.name || "", impact: (e.impact || "").toLowerCase(),
-      actual:   (e.actual   != null && e.actual   !== "") ? e.actual   : null,
-      forecast: (e.forecast != null && e.forecast !== "") ? e.forecast : null,
-      previous: (e.previous != null && e.previous !== "") ? e.previous : null,
-    }));
 
     const filterDay = (arr, ds) => arr.filter(e => {
       if (!e.date) return false;
@@ -182,32 +175,72 @@ const server = http.createServer(async (req, res) => {
       return loc === ds;
     }).sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    // 1. Try FF CDN feeds
+    // ── Source 1: Trading Economics (guest:guest free tier) ──────────────────
+    // Returns current week events. importance: 1=low, 2=medium, 3=high
+    try {
+      const d = new Date(date + "T00:00:00Z");
+      const d2 = new Date(d); d2.setDate(d2.getDate() + 1);
+      const fmt = x => x.toISOString().slice(0,10);
+      // Major forex countries only to keep response size small
+      const countries = "united states,euro area,united kingdom,japan,australia,canada,new zealand,switzerland,china";
+      const teUrl = `https://api.tradingeconomics.com/calendar/country/${encodeURIComponent(countries)}/${fmt(d)}/${fmt(d2)}?c=guest:guest&f=json`;
+      const { status, text } = await fetchUrl(teUrl);
+      if (status === 200 && text && !text.includes("Forbidden")) {
+        const arr = JSON.parse(text);
+        if (Array.isArray(arr) && arr.length) {
+          const impMap = { 1: "low", 2: "medium", 3: "high" };
+          const events = arr.map(e => ({
+            date:     e.Date || "",
+            currency: e.Currency || e.Country || "",
+            name:     e.Event || e.Category || "",
+            impact:   impMap[e.Importance] || (e.Importance === 3 ? "high" : e.Importance === 2 ? "medium" : "low"),
+            actual:   (e.Actual   != null && e.Actual   !== "") ? String(e.Actual)   : null,
+            forecast: (e.Forecast != null && e.Forecast !== "") ? String(e.Forecast) : null,
+            previous: (e.Previous != null && e.Previous !== "") ? String(e.Previous) : null,
+            source:   "tradingeconomics",
+          }));
+          const hits = filterDay(events, date);
+          if (hits.length > 0) {
+            console.log(`[CAL] Trading Economics: ${hits.length} events for ${date}`);
+            return json(res, 200, { events: hits, source: "tradingeconomics" });
+          }
+        }
+      }
+    } catch(e) { console.warn("[CAL] Trading Economics failed:", e.message); }
+
+    // ── Source 2: FF CDN (may still work for current/next week) ─────────────
     const ffUrls = [
       "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
       "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
       "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json",
-      "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
     ];
     for (const u of ffUrls) {
       try {
-        const txt = await fetchUrl(u);
-        if (txt.includes("DOCTYPE") || txt.includes("Request Denied")) continue;
-        const arr = JSON.parse(txt);
+        const { text } = await fetchUrl(u);
+        if (!text || text.includes("DOCTYPE") || text.includes("Request Denied")) continue;
+        const arr = JSON.parse(text);
         if (!Array.isArray(arr) || !arr.length) continue;
-        const hits = filterDay(normalise(arr), date);
+        const norm = arr.map(e => ({
+          date: e.date || "", currency: e.country || e.currency || "",
+          name: e.title || e.name || "", impact: (e.impact || "").toLowerCase(),
+          actual:   (e.actual   != null && e.actual   !== "") ? e.actual   : null,
+          forecast: (e.forecast != null && e.forecast !== "") ? e.forecast : null,
+          previous: (e.previous != null && e.previous !== "") ? e.previous : null,
+          source: "forexfactory",
+        }));
+        const hits = filterDay(norm, date);
         if (hits.length > 0) {
-          console.log(`[CAL] FF hit ${hits.length} events for ${date}`);
+          console.log(`[CAL] ForexFactory CDN: ${hits.length} events for ${date}`);
           return json(res, 200, { events: hits, source: "forexfactory" });
         }
       } catch(e) { console.warn("[CAL] FF failed:", e.message); }
     }
 
-    // 2. Fallback: Claude AI
+    // ── Source 3: Claude AI fallback ─────────────────────────────────────────
     try {
       const d = new Date(date + "T12:00:00");
       const dayName = d.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-      const prompt = "List all major forex economic calendar events for " + dayName + ".\nReturn ONLY a JSON array. Each object must have: time (HH:MM EST), currency (3-letter code), name, impact (high/medium/low), forecast (string or null), previous (string or null). Include all impact levels. No extra text, only the JSON array.";
+      const prompt = "List all major forex economic calendar events for " + dayName + ".\nReturn ONLY a JSON array. Each object must have: time (HH:MM UTC), currency (3-letter ISO code like USD/EUR/GBP/JPY), name, impact (high/medium/low), forecast (string or null), previous (string or null). Include all impact levels. No extra text, only the JSON array.";
 
       const body = JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, messages: [{ role: "user", content: prompt }] });
       const apiKey = process.env.ANTHROPIC_API_KEY || "";
