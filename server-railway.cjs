@@ -92,6 +92,196 @@ function cleanTrade(trade) {
   };
 }
 
+// ─── In-memory price cache (stale-while-revalidate) ─────────────────────────
+// Cache stores the last successful quote response per symbol-set key
+const priceCache = new Map(); // key -> { quotes, fetchedAt, ttl }
+const CACHE_TTL_MS  = 30 * 1000;  // 30s — fresh threshold
+const CACHE_STALE_MS = 5 * 60 * 1000; // 5min — max stale we'll serve
+
+// Background refresh tracker — avoids duplicate fetches in-flight
+const refreshInFlight = new Set();
+
+function getCacheKey(symbols) { return symbols.slice().sort().join(","); }
+
+function getCached(key) {
+  const entry = priceCache.get(key);
+  if (!entry) return null;
+  const age = Date.now() - entry.fetchedAt;
+  if (age > CACHE_STALE_MS) { priceCache.delete(key); return null; } // too old
+  return { ...entry, isStale: age > CACHE_TTL_MS };
+}
+
+// ─── fetchQuotes(symbols) — core price fetching logic ────────────────────────
+async function fetchQuotes(raw) {
+  const https = require("https");
+  const TD_KEY = process.env.TWELVE_DATA_KEY || "";
+
+  const httpsGet = (host, path, hdrs={}, timeout=12000) => new Promise((resolve, reject) => {
+    const opts = {
+      hostname: host, path, method: "GET", timeout,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Encoding": "identity",
+        ...hdrs
+      }
+    };
+    const r = https.request(opts, (resp) => {
+      let d = "";
+      resp.on("data", c => d += c);
+      resp.on("end", () => resolve({ text: d, status: resp.statusCode, headers: resp.headers || {} }));
+    });
+    r.on("error", reject);
+    r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+    r.end();
+  });
+
+  const getDec = sym => sym.includes("JPY") ? 3
+    : ["XAUUSD","XAGUSD","BTCUSD","ETHUSD","BNBUSD","SOLUSD","SPX500","US30","NAS100",
+       "UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50","USOIL","UKOIL","NATGAS"].includes(sym) ? 2 : 5;
+  const fmt = (v, dec) => v != null && !isNaN(v) ? parseFloat(parseFloat(v).toFixed(dec)) : null;
+
+  const TD_MAP = {
+    "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
+    "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","EURGBP":"EUR/GBP",
+    "EURJPY":"EUR/JPY","GBPJPY":"GBP/JPY","EURCHF":"EUR/CHF","AUDJPY":"AUD/JPY",
+    "CADJPY":"CAD/JPY","CHFJPY":"CHF/JPY","GBPCHF":"GBP/CHF","EURCAD":"EUR/CAD",
+    "AUDCAD":"AUD/CAD","AUDNZD":"AUD/NZD","NZDJPY":"NZD/JPY","GBPCAD":"GBP/CAD",
+    "GBPNZD":"GBP/NZD","GBPAUD":"GBP/AUD","EURAUD":"EUR/AUD","EURNZD":"EUR/NZD",
+    "CADCHF":"CAD/CHF","NZDCAD":"NZD/CAD","NZDCHF":"NZD/CHF","AUDCHF":"AUD/CHF",
+    "USDMXN":"USD/MXN","USDZAR":"USD/ZAR","USDNOK":"USD/NOK","USDSEK":"USD/SEK",
+    "USDDKK":"USD/DKK","USDPLN":"USD/PLN","USDTRY":"USD/TRY","USDSGD":"USD/SGD",
+    "USDHKD":"USD/HKD","USDCNH":"USD/CNH",
+    "XAUUSD":"XAU/USD","XAGUSD":"XAG/USD","XPTUSD":"XPT/USD","XPDUSD":"XPD/USD",
+    "BTCUSD":"BTC/USD","ETHUSD":"ETH/USD","BNBUSD":"BNB/USD","SOLUSD":"SOL/USD",
+    "XRPUSD":"XRP/USD","ADAUSD":"ADA/USD","DOTUSD":"DOT/USD","LNKUSD":"LINK/USD",
+    "NAS100":"NDX","SPX500":"SPX","US30":"DJI","UK100":"UKX","GER40":"DAX",
+    "FRA40":"CAC40","JPN225":"N225","AUS200":"AS51","HK50":"HSI",
+    "USOIL":"WTI","UKOIL":"BRENT","NATGAS":"NGAS",
+  };
+
+  const out = {};
+  raw.forEach(s => { out[s] = null; });
+
+  // ── SOURCE 1: Twelve Data ─────────────────────────────────────────────────
+  if (TD_KEY) {
+    try {
+      const tdSymbols = raw.map(s => TD_MAP[s]).filter(Boolean);
+      const tdByOurs  = {};
+      raw.forEach(s => { if (TD_MAP[s]) tdByOurs[TD_MAP[s]] = s; });
+
+      if (tdSymbols.length) {
+        // Fetch price + quote in parallel
+        const [priceResp, quoteResp] = await Promise.all([
+          httpsGet("api.twelvedata.com",
+            "/price?symbol=" + encodeURIComponent(tdSymbols.join(",")) + "&apikey=" + TD_KEY + "&dp=5"),
+          httpsGet("api.twelvedata.com",
+            "/quote?symbol=" + encodeURIComponent(tdSymbols.join(",")) + "&apikey=" + TD_KEY + "&dp=5"),
+        ]);
+
+        const isSingle = tdSymbols.length === 1;
+        const priceMap = priceResp.status===200 ? (isSingle
+          ? { [tdSymbols[0]]: JSON.parse(priceResp.text) }
+          : JSON.parse(priceResp.text)) : {};
+        const quoteMap = quoteResp.status===200 ? (isSingle
+          ? { [tdSymbols[0]]: JSON.parse(quoteResp.text) }
+          : JSON.parse(quoteResp.text)) : {};
+
+        tdSymbols.forEach(tdSym => {
+          const ourSym = tdByOurs[tdSym];
+          if (!ourSym) return;
+          const p = priceMap[tdSym];
+          const q = quoteMap[tdSym];
+          const price = parseFloat(p?.price);
+          if (!price || isNaN(price) || price <= 0) return;
+          const dec       = getDec(ourSym);
+          const prevClose = q?.previous_close ? parseFloat(q.previous_close) : null;
+          const high      = q?.high  ? parseFloat(q.high)  : null;
+          const low       = q?.low   ? parseFloat(q.low)   : null;
+          const change    = prevClose ? price - prevClose : null;
+          const changePct = prevClose && change ? (change / prevClose) * 100 : null;
+          out[ourSym] = {
+            price:     fmt(price, dec),
+            change:    fmt(change, dec),
+            changePct: fmt(changePct, 2),
+            high:      fmt(high, dec),
+            low:       fmt(low, dec),
+            prevClose: fmt(prevClose, dec),
+          };
+        });
+        console.log("[QUOTE] TwelveData:", raw.filter(s=>out[s]).length + "/" + raw.length);
+      }
+    } catch(e) { console.warn("[QUOTE] TwelveData failed:", e.message); }
+  }
+
+  // ── SOURCE 2: CoinGecko (crypto fallback) ────────────────────────────────
+  const cryptoNeeded = raw.filter(s => out[s]===null &&
+    ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LNKUSD"].includes(s));
+  if (cryptoNeeded.length) {
+    try {
+      const cgMap = {"BTCUSD":"bitcoin","ETHUSD":"ethereum","BNBUSD":"binancecoin",
+        "SOLUSD":"solana","XRPUSD":"ripple","ADAUSD":"cardano","DOTUSD":"polkadot","LNKUSD":"chainlink"};
+      const ids = cryptoNeeded.map(s=>cgMap[s]).filter(Boolean).join(",");
+      const cgResp = await httpsGet("api.coingecko.com",
+        "/api/v3/coins/markets?vs_currency=usd&ids="+ids+"&price_change_percentage=24h");
+      if (cgResp.status===200) {
+        const byId = {};
+        JSON.parse(cgResp.text).forEach(c => { byId[c.id] = c; });
+        cryptoNeeded.forEach(sym => {
+          const c = byId[cgMap[sym]];
+          if (!c) return;
+          const dec = getDec(sym);
+          out[sym] = { price:fmt(c.current_price,dec), change:fmt(c.price_change_24h,dec),
+            changePct:fmt(c.price_change_percentage_24h,2), high:fmt(c.high_24h,dec),
+            low:fmt(c.low_24h,dec), prevClose:fmt(c.current_price-c.price_change_24h,dec) };
+        });
+        console.log("[QUOTE] CoinGecko fallback:", cryptoNeeded.filter(s=>out[s]).length);
+      }
+    } catch(e) { console.warn("[QUOTE] CoinGecko failed:", e.message); }
+  }
+
+  // ── SOURCE 3: Frankfurter (forex + metals fallback) ──────────────────────
+  const ffNeeded = raw.filter(s => out[s]===null);
+  if (ffNeeded.length) {
+    try {
+      const ffForex  = ffNeeded.filter(s => s.length===6 && !s.startsWith("XA") && !s.startsWith("XP"));
+      const ffMetals = ffNeeded.filter(s => ["XAUUSD","XAGUSD"].includes(s));
+      const codes = [...new Set([
+        ...ffForex.map(s=>s.slice(0,3)), ...ffForex.map(s=>s.slice(3,6)),
+        ...(ffMetals.length ? ["XAU","XAG"] : [])
+      ])].filter(c=>c!=="USD").join(",");
+      if (codes) {
+        const [latestR, prevR] = await Promise.all([
+          httpsGet("api.frankfurter.app", "/latest?from=USD&to="+codes),
+          (()=>{ const yd=new Date(); yd.setDate(yd.getDate()-1);
+            if(yd.getDay()===0)yd.setDate(yd.getDate()-2);
+            if(yd.getDay()===6)yd.setDate(yd.getDate()-1);
+            return httpsGet("api.frankfurter.app","/"+yd.toISOString().slice(0,10)+"?from=USD&to="+codes); })()
+        ]);
+        const rates = latestR.status===200 ? {USD:1,...JSON.parse(latestR.text).rates} : {USD:1};
+        const prev  = prevR.status===200   ? {USD:1,...JSON.parse(prevR.text).rates}   : rates;
+        ffForex.forEach(sym => {
+          const b=sym.slice(0,3),q=sym.slice(3,6),bR=rates[b],qR=rates[q];
+          if(!bR||!qR) return;
+          const price=qR/bR, pc=(prev[q]||qR)/(prev[b]||bR), dec=getDec(sym);
+          out[sym]={price:fmt(price,dec),change:fmt(price-pc,dec),changePct:fmt((price-pc)/pc*100,2),high:null,low:null,prevClose:fmt(pc,dec)};
+        });
+        ["XAUUSD","XAGUSD"].forEach(sym=>{
+          if(!ffNeeded.includes(sym)) return;
+          const key=sym==="XAUUSD"?"XAU":"XAG", r=rates[key], p=prev[key]||r;
+          if(!r) return;
+          const price=1/r, pc=1/p;
+          out[sym]={price:fmt(price,2),change:fmt(price-pc,2),changePct:fmt((price-pc)/pc*100,2),high:null,low:null,prevClose:fmt(pc,2)};
+        });
+        console.log("[QUOTE] Frankfurter fallback:", ffNeeded.filter(s=>out[s]).length);
+      }
+    } catch(e) { console.warn("[QUOTE] Frankfurter failed:", e.message); }
+  }
+
+  console.log("[QUOTE] Final:", raw.filter(s=>out[s]!==null).length+"/"+raw.length+" filled");
+  return out;
+}
+
 // ─── HTTP Server ──────────────────────────────────────────────────────────────
 const server = http.createServer(async (req, res) => {
   setCORS(res);
@@ -508,223 +698,42 @@ const server = http.createServer(async (req, res) => {
   }
 
   // GET /api/quote?symbols=EURUSD,XAUUSD,...
-  // Sources: 1) Twelve Data (primary — forex, metals, crypto, indices, energy)
-  //          2) CoinGecko (crypto fallback — free, no key)
-  //          3) Frankfurter (forex/metals fallback — ECB, free)
+  // Sources: 1) Twelve Data (primary) 2) CoinGecko (crypto fallback) 3) Frankfurter (forex/metals fallback)
+  // Strategy: stale-while-revalidate — serve cached data immediately, refresh in background
   if (req.method === "GET" && url.startsWith("/api/quote")) {
     try {
       const qs = new URLSearchParams(fullUrl.split("?")[1]||"");
       const raw = (qs.get("symbols")||"").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean).slice(0,30);
       if (!raw.length) return json(res, 400, { error: "symbols required" });
 
-      const https = require("https");
-      const TD_KEY = process.env.TWELVE_DATA_KEY || "";
+      const cacheKey = getCacheKey(raw);
+      const cached   = getCached(cacheKey);
 
-      // ── shared httpsGet helper ──────────────────────────────────────────
-      const httpsGet = (host, path, hdrs={}, timeout=10000) => new Promise((resolve, reject) => {
-        const opts = {
-          hostname: host, path, method: "GET", timeout,
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Encoding": "identity",
-            ...hdrs
-          }
-        };
-        const r = https.request(opts, (resp) => {
-          let d = "";
-          resp.on("data", c => d += c);
-          resp.on("end", () => resolve({ text: d, status: resp.statusCode, headers: resp.headers || {} }));
-        });
-        r.on("error", reject);
-        r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
-        r.end();
-      });
+      // ── Serve cached data immediately if available ────────────────────
+      if (cached) {
+        // Respond immediately with cached data (fresh or stale)
+        json(res, 200, { quotes: cached.quotes, fetchedAt: new Date(cached.fetchedAt).toISOString(), cached: true, stale: cached.isStale });
 
-      // decimal places per symbol
-      const getDec = sym => sym.includes("JPY") ? 3
-        : ["XAUUSD","XAGUSD","BTCUSD","ETHUSD","BNBUSD","SOLUSD","SPX500","US30","NAS100",
-           "UK100","GER40","FRA40","JPN225","AUS200","HK50","NIFTY50","USOIL","UKOIL","NATGAS"].includes(sym) ? 2 : 5;
-      const fmt = (v, dec) => v != null && !isNaN(v) ? parseFloat(parseFloat(v).toFixed(dec)) : null;
-
-      // Twelve Data symbol mapping — their format vs our MT5 symbols
-      const TD_MAP = {
-        // Forex — Twelve Data uses EUR/USD format
-        "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
-        "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","EURGBP":"EUR/GBP",
-        "EURJPY":"EUR/JPY","GBPJPY":"GBP/JPY","EURCHF":"EUR/CHF","AUDJPY":"AUD/JPY",
-        "CADJPY":"CAD/JPY","CHFJPY":"CHF/JPY","GBPCHF":"GBP/CHF","EURCAD":"EUR/CAD",
-        "AUDCAD":"AUD/CAD","AUDNZD":"AUD/NZD","NZDJPY":"NZD/JPY","GBPCAD":"GBP/CAD",
-        "GBPNZD":"GBP/NZD","GBPAUD":"GBP/AUD","EURAUD":"EUR/AUD","EURNZD":"EUR/NZD",
-        "CADCHF":"CAD/CHF","NZDCAD":"NZD/CAD","NZDCHF":"NZD/CHF","AUDCHF":"AUD/CHF",
-        "USDMXN":"USD/MXN","USDZAR":"USD/ZAR","USDNOK":"USD/NOK","USDSEK":"USD/SEK",
-        "USDDKK":"USD/DKK","USDPLN":"USD/PLN","USDTRY":"USD/TRY","USDSGD":"USD/SGD",
-        "USDHKD":"USD/HKD","USDCNH":"USD/CNH","DXY":"DX-Y.NYB",
-        // Metals
-        "XAUUSD":"XAU/USD","XAGUSD":"XAG/USD","XPTUSD":"XPT/USD","XPDUSD":"XPD/USD",
-        // Crypto (Twelve Data supports these directly)
-        "BTCUSD":"BTC/USD","ETHUSD":"ETH/USD","BNBUSD":"BNB/USD","SOLUSD":"SOL/USD",
-        "XRPUSD":"XRP/USD","ADAUSD":"ADA/USD","DOTUSD":"DOT/USD","LNKUSD":"LINK/USD",
-        // Indices — Twelve Data uses these tickers
-        "NAS100":"NDX","SPX500":"SPX","US30":"DJI","UK100":"UKX","GER40":"DAX",
-        "FRA40":"CAC40","JPN225":"N225","AUS200":"AS51","HK50":"HSI",
-        // Energy
-        "USOIL":"WTI","UKOIL":"BRENT","NATGAS":"NGAS",
-      };
-
-      const out = {};
-      raw.forEach(s => { out[s] = null; });
-
-      // ── SOURCE 1: Twelve Data (primary for everything) ────────────────────
-      if (TD_KEY) {
-        try {
-          // Map our symbols to Twelve Data symbols
-          const tdSymbols = raw.map(s => TD_MAP[s]).filter(Boolean);
-          const tdByOurs  = {}; // TD symbol → our symbol
-          raw.forEach(s => { if (TD_MAP[s]) tdByOurs[TD_MAP[s]] = s; });
-
-          if (tdSymbols.length) {
-            // Twelve Data /price endpoint — batch up to 120 symbols
-            const tdPath = "/price?symbol=" + encodeURIComponent(tdSymbols.join(",")) +
-              "&apikey=" + TD_KEY + "&dp=5";
-
-            const tdResp = await httpsGet("api.twelvedata.com", tdPath, {}, 12000);
-            if (tdResp.status === 200) {
-              const tdData = JSON.parse(tdResp.text);
-
-              // Also fetch quote (has open, high, low, prev_close, change)
-              const tdQPath = "/quote?symbol=" + encodeURIComponent(tdSymbols.join(",")) +
-                "&apikey=" + TD_KEY + "&dp=5";
-              let quoteData = {};
-              try {
-                const tdQResp = await httpsGet("api.twelvedata.com", tdQPath, {}, 12000);
-                if (tdQResp.status === 200) quoteData = JSON.parse(tdQResp.text);
-              } catch(e) {}
-
-              // For single symbol, Twelve Data returns object directly
-              // For multiple, it returns { SYMBOL: {...}, SYMBOL2: {...} }
-              const isSingle = tdSymbols.length === 1;
-              const priceMap  = isSingle ? { [tdSymbols[0]]: tdData } : tdData;
-              const quoteMap  = isSingle ? { [tdSymbols[0]]: quoteData } : quoteData;
-
-              tdSymbols.forEach(tdSym => {
-                const ourSym = tdByOurs[tdSym];
-                if (!ourSym) return;
-                const pEntry = priceMap[tdSym] || priceMap[tdSym.replace("/","")] || null;
-                const qEntry = quoteMap[tdSym] || quoteMap[tdSym.replace("/","")] || null;
-                const price = pEntry?.price ? parseFloat(pEntry.price) : null;
-                if (!price || price <= 0) return;
-                const dec = getDec(ourSym);
-                const open      = qEntry?.open      ? parseFloat(qEntry.open)       : null;
-                const high      = qEntry?.high      ? parseFloat(qEntry.high)       : null;
-                const low       = qEntry?.low       ? parseFloat(qEntry.low)        : null;
-                const prevClose = qEntry?.previous_close ? parseFloat(qEntry.previous_close) : null;
-                const change    = prevClose ? price - prevClose : null;
-                const changePct = prevClose && change ? (change / prevClose) * 100 : null;
-                out[ourSym] = {
-                  price:     fmt(price, dec),
-                  change:    fmt(change, dec),
-                  changePct: fmt(changePct, 2),
-                  high:      fmt(high, dec),
-                  low:       fmt(low, dec),
-                  prevClose: fmt(prevClose, dec),
-                };
-              });
-              const tdFilled = raw.filter(s=>out[s]!==null).length;
-              console.log("[QUOTE] TwelveData ok:", tdFilled, "/", raw.length, "symbols");
-            } else {
-              console.warn("[QUOTE] TwelveData status:", tdResp.status, tdResp.text.slice(0,120));
-            }
-          }
-        } catch(e) { console.warn("[QUOTE] TwelveData failed:", e.message); }
-      } else {
-        console.warn("[QUOTE] No TWELVE_DATA_KEY env var set — skipping primary source");
+        // If stale, kick off background refresh (only one at a time per symbol set)
+        if (cached.isStale && !refreshInFlight.has(cacheKey)) {
+          refreshInFlight.add(cacheKey);
+          fetchQuotes(raw).then(quotes => {
+            priceCache.set(cacheKey, { quotes, fetchedAt: Date.now() });
+            console.log("[QUOTE] Background refresh done:", cacheKey.slice(0,60));
+          }).catch(e => {
+            console.warn("[QUOTE] Background refresh failed:", e.message);
+          }).finally(() => {
+            refreshInFlight.delete(cacheKey);
+          });
+        }
+        return; // response already sent
       }
 
-      // ── SOURCE 2: CoinGecko (crypto fallback — free, no key needed) ──────
-      const cryptoStillNeeded = raw.filter(s => out[s]===null &&
-        ["BTCUSD","ETHUSD","BNBUSD","SOLUSD","XRPUSD","ADAUSD","DOTUSD","LNKUSD"].includes(s));
-      if (cryptoStillNeeded.length) {
-        try {
-          const cgMap = {
-            "BTCUSD":"bitcoin","ETHUSD":"ethereum","BNBUSD":"binancecoin",
-            "SOLUSD":"solana","XRPUSD":"ripple","ADAUSD":"cardano",
-            "DOTUSD":"polkadot","LNKUSD":"chainlink"
-          };
-          const ids = cryptoStillNeeded.map(s=>cgMap[s]).filter(Boolean).join(",");
-          if (ids) {
-            const cgResp = await httpsGet("api.coingecko.com",
-              "/api/v3/coins/markets?vs_currency=usd&ids=" + ids + "&price_change_percentage=24h",
-              { "Accept": "application/json" });
-            if (cgResp.status === 200) {
-              const cgData = JSON.parse(cgResp.text);
-              const cgById = {};
-              cgData.forEach(c => { cgById[c.id] = c; });
-              cryptoStillNeeded.forEach(sym => {
-                const c = cgById[cgMap[sym]];
-                if (!c) return;
-                const dec = getDec(sym);
-                out[sym] = {
-                  price:     fmt(c.current_price, dec),
-                  change:    fmt(c.price_change_24h, dec),
-                  changePct: fmt(c.price_change_percentage_24h, 2),
-                  high:      fmt(c.high_24h, dec),
-                  low:       fmt(c.low_24h, dec),
-                  prevClose: fmt(c.current_price - c.price_change_24h, dec),
-                };
-              });
-              console.log("[QUOTE] CoinGecko fallback:", cryptoStillNeeded.filter(s=>out[s]).length, "crypto");
-            }
-          }
-        } catch(e) { console.warn("[QUOTE] CoinGecko fallback failed:", e.message); }
-      }
+      // ── No cache — must wait for fresh fetch ─────────────────────────
+      const quotes = await fetchQuotes(raw);
+      priceCache.set(cacheKey, { quotes, fetchedAt: Date.now() });
+      return json(res, 200, { quotes, fetchedAt: new Date().toISOString(), cached: false });
 
-      // ── SOURCE 3: Frankfurter (forex + metals fallback — ECB, always reliable) ─
-      const ffStillNeeded = raw.filter(s => out[s]===null);
-      if (ffStillNeeded.length) {
-        try {
-          // Forex pairs
-          const ffForex  = ffStillNeeded.filter(s => s.length===6 && !s.startsWith("XA") && !s.startsWith("XP"));
-          const ffMetals = ffStillNeeded.filter(s => ["XAUUSD","XAGUSD"].includes(s));
-          const ffAll    = [...new Set([...ffForex.map(s=>s.slice(0,3)), ...ffForex.map(s=>s.slice(3,6)),
-                                        ...ffMetals.map(()=>["XAU","XAG"]).flat()])].filter(c=>c!=="USD").join(",");
-          if (ffAll) {
-            const ffResp = await httpsGet("api.frankfurter.app", "/latest?from=USD&to=" + ffAll, {});
-            if (ffResp.status === 200) {
-              const rates = { USD: 1, ...JSON.parse(ffResp.text).rates };
-              // Get yesterday for prevClose
-              const yd = new Date(); yd.setDate(yd.getDate()-1);
-              if (yd.getDay()===0) yd.setDate(yd.getDate()-2);
-              if (yd.getDay()===6) yd.setDate(yd.getDate()-1);
-              let prevRates = { USD: 1 };
-              try {
-                const pr = await httpsGet("api.frankfurter.app", "/" + yd.toISOString().slice(0,10) + "?from=USD&to=" + ffAll, {});
-                if (pr.status===200) prevRates = { USD:1, ...JSON.parse(pr.text).rates };
-              } catch(e) {}
-              ffForex.forEach(sym => {
-                const base=sym.slice(0,3), quote=sym.slice(3,6);
-                const bR=rates[base],qR=rates[quote];
-                if (!bR||!qR) return;
-                const price=qR/bR, prev=(prevRates[quote]||qR)/(prevRates[base]||bR);
-                const dec=getDec(sym);
-                out[sym]={ price:fmt(price,dec),change:fmt(price-prev,dec),changePct:fmt((price-prev)/prev*100,2),high:null,low:null,prevClose:fmt(prev,dec) };
-              });
-              ["XAUUSD","XAGUSD"].forEach(sym => {
-                if (!ffStillNeeded.includes(sym)) return;
-                const key=sym==="XAUUSD"?"XAU":"XAG", r=rates[key];
-                if (!r) return;
-                const price=1/r, prev=prevRates[key]?1/prevRates[key]:price;
-                out[sym]={ price:fmt(price,2),change:fmt(price-prev,2),changePct:fmt((price-prev)/prev*100,2),high:null,low:null,prevClose:fmt(prev,2) };
-              });
-              console.log("[QUOTE] Frankfurter fallback:", ffStillNeeded.filter(s=>out[s]).length, "symbols");
-            }
-          }
-        } catch(e) { console.warn("[QUOTE] Frankfurter fallback failed:", e.message); }
-      }
-
-      const filled = raw.filter(s => out[s] !== null).length;
-      console.log(`[QUOTE] Final: ${filled}/${raw.length} symbols filled`);
-      return json(res, 200, { quotes: out, fetchedAt: new Date().toISOString() });
     } catch(e) {
       console.warn("[QUOTE] Error:", e.message);
       return json(res, 500, { error: e.message });
