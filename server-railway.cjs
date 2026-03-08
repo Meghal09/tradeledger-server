@@ -152,7 +152,8 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // GET /api/calendar?date=YYYY-MM-DD  — investing.com scraper + fallbacks
+  // GET /api/calendar?date=YYYY-MM-DD
+  // FF CDN (live, this/next week) → Claude AI (any date, cached in-memory)
   if (req.method === "GET" && url === "/api/calendar") {
     const qs   = new URL(req.url, "http://x").searchParams;
     const date = qs.get("date");
@@ -160,22 +161,15 @@ const server = http.createServer(async (req, res) => {
 
     const https = require("https");
 
-    // Generic POST helper (investing.com needs POST)
-    const httpPost = (hostname, path, postBody, headers) => new Promise((resolve, reject) => {
-      const buf = Buffer.from(postBody);
-      const opts = { hostname, path, method: "POST", timeout: 12000,
-        headers: Object.assign({ "Content-Length": buf.length }, headers) };
-      const r = https.request(opts, (resp) => {
-        let d = ""; resp.on("data", c => d += c);
-        resp.on("end", () => resolve({ status: resp.statusCode, text: d, headers: resp.headers }));
-      });
-      r.on("error", reject);
-      r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
-      r.write(buf); r.end();
-    });
+    // In-memory cache — avoids re-calling AI for the same date
+    if (!global._calCache) global._calCache = {};
+    if (global._calCache[date]) {
+      console.log("[CAL] Cache hit for " + date);
+      return json(res, 200, global._calCache[date]);
+    }
 
-    const httpGet = (u, headers) => new Promise((resolve, reject) => {
-      const r = https.get(u, { headers: Object.assign({ "User-Agent": "Mozilla/5.0" }, headers || {}), timeout: 10000 }, (resp) => {
+    const httpGet = (u) => new Promise((resolve, reject) => {
+      const r = https.get(u, { headers: { "User-Agent": "Mozilla/5.0" }, timeout: 8000 }, (resp) => {
         let d = ""; resp.on("data", c => d += c);
         resp.on("end", () => resolve({ status: resp.statusCode, text: d }));
       });
@@ -190,135 +184,90 @@ const server = http.createServer(async (req, res) => {
       return loc === ds;
     }).sort((a, b) => new Date(a.date) - new Date(b.date));
 
-    // ── Source 1: investing.com (POST to their internal API, no key needed) ───
-    // They use a form POST that returns JSON — works server-side without CORS
-    try {
-      const [y, m, d2] = date.split("-");
-      // investing.com uses a different date range format: dateFrom, dateTo
-      const dateFrom = date;
-      const dateTo   = date;
-      const postBody = `dateFrom=${dateFrom}&dateTo=${dateTo}&timeZone=55&timeFilter=timeRemain&currentTab=custom&submitFilters=1&limit_from=0`;
-      const { status, text } = await httpPost(
-        "www.investing.com",
-        "/economic-calendar/Service/getCalendarFilteredData",
-        postBody,
-        {
-          "Content-Type":   "application/x-www-form-urlencoded",
-          "X-Requested-With": "XMLHttpRequest",
-          "Referer":        "https://www.investing.com/economic-calendar/",
-          "User-Agent":     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-          "Accept":         "application/json, text/javascript, */*; q=0.01",
-          "Accept-Language":"en-US,en;q=0.9",
-          "Origin":         "https://www.investing.com",
-        }
-      );
-      if (status === 200 && text) {
-        let parsed;
-        try { parsed = JSON.parse(text); } catch { parsed = null; }
-        if (parsed && parsed.data) {
-          // Parse the HTML table rows from parsed.data
-          const rows = parsed.data || "";
-          // Extract events using regex on the HTML fragment
-          const events = [];
-          const rowRe = /<tr[^>]*class="[^"]*js-event-item[^"]*"[^>]*data-event-datetime="([^"]*)"[^>]*>([\s\S]*?)<\/tr>/g;
-          let m2;
-          while ((m2 = rowRe.exec(rows)) !== null) {
-            const rowHtml = m2[2];
-            const dt = m2[1]; // e.g. "2026/03/09 13:30:00"
-            const cur    = (rowHtml.match(/class="flagCur[^"]*"[^>]*>\s*([A-Z]{3})/)||[])[1] || "";
-            const nameM  = rowHtml.match(/class="event"[^>]*><a[^>]*>([^<]+)<\/a>/);
-            const name   = nameM ? nameM[1].trim() : "";
-            const impM   = rowHtml.match(/class="[^"]*sentiment[^"]*"[^>]*title="([^"]+)"/);
-            const impTxt = impM ? impM[1].toLowerCase() : "";
-            const imp    = impTxt.includes("high") ? "high" : impTxt.includes("moderate") ? "medium" : "low";
-            const actM   = rowHtml.match(/class="[^"]*actual[^"]*"[^>]*>([^<]*)<\/td>/);
-            const fctM   = rowHtml.match(/class="[^"]*forecast[^"]*"[^>]*>([^<]*)<\/td>/);
-            const prvM   = rowHtml.match(/class="[^"]*prev[^"]*"[^>]*>([^<]*)<\/td>/);
-            const clean  = s => s ? s.replace(/<[^>]+>/g,"").trim()||null : null;
-            if (!name || !cur) continue;
-            // Convert datetime: "2026/03/09 13:30:00" -> ISO
-            const isoDate = dt.replace(/\//g,"-").replace(" ","T") + "Z";
-            events.push({
-              date: isoDate, currency: cur, name,
-              impact: imp,
-              actual:   clean(actM ? actM[1] : null),
-              forecast: clean(fctM ? fctM[1] : null),
-              previous: clean(prvM ? prvM[1] : null),
-              source: "investing",
-            });
-          }
-          if (events.length > 0) {
-            console.log(`[CAL] investing.com: ${events.length} events for ${date}`);
-            return json(res, 200, { events: events.sort((a,b)=>a.date.localeCompare(b.date)), source: "investing" });
-          }
-        }
-      }
-    } catch(e) { console.warn("[CAL] investing.com failed:", e.message); }
-
-    // ── Source 2: FF CDN (works for current + next week) ────────────────────
+    // Source 1: ForexFactory CDN (real live data, current/next week only)
     const ffUrls = [
       "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
       "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
       "https://cdn-nfs.faireconomy.media/ff_calendar_nextweek.json",
+      "https://nfs.faireconomy.media/ff_calendar_nextweek.json",
     ];
     for (const u of ffUrls) {
       try {
-        const { text } = await httpGet(u);
-        if (!text || text.includes("DOCTYPE") || text.includes("Request Denied")) continue;
+        const { status, text } = await httpGet(u);
+        if (status !== 200 || !text || text.includes("<!DOCTYPE") || text.includes("Request Denied") || text.includes("Forbidden")) continue;
         const arr = JSON.parse(text);
         if (!Array.isArray(arr) || !arr.length) continue;
         const norm = arr.map(e => ({
-          date: e.date || "", currency: e.country || e.currency || "",
-          name: e.title || e.name || "", impact: (e.impact || "").toLowerCase(),
-          actual:   (e.actual   != null && e.actual   !== "") ? e.actual   : null,
-          forecast: (e.forecast != null && e.forecast !== "") ? e.forecast : null,
-          previous: (e.previous != null && e.previous !== "") ? e.previous : null,
-          source: "forexfactory",
+          date:     e.date || "",
+          currency: e.country || e.currency || "",
+          name:     e.title || e.name || "",
+          impact:   (e.impact || "").toLowerCase(),
+          actual:   (e.actual   != null && e.actual   !== "") ? String(e.actual)   : null,
+          forecast: (e.forecast != null && e.forecast !== "") ? String(e.forecast) : null,
+          previous: (e.previous != null && e.previous !== "") ? String(e.previous) : null,
+          source:   "forexfactory",
         }));
         const hits = filterDay(norm, date);
         if (hits.length > 0) {
-          console.log(`[CAL] ForexFactory CDN: ${hits.length} events for ${date}`);
-          return json(res, 200, { events: hits, source: "forexfactory" });
+          const payload = { events: hits, source: "forexfactory" };
+          global._calCache[date] = payload;
+          console.log("[CAL] FF CDN: " + hits.length + " events for " + date);
+          return json(res, 200, payload);
         }
       } catch(e) { console.warn("[CAL] FF failed:", e.message); }
     }
 
-    // ── Source 3: Claude AI fallback ─────────────────────────────────────────
+    // Source 2: Claude AI — works for ANY date, past or future, cached per date
     try {
-      const d = new Date(date + "T12:00:00");
-      const dayName = d.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
-      const prompt = "List all major forex economic calendar events for " + dayName + ".\nReturn ONLY a JSON array. Each object must have: time (HH:MM UTC), currency (3-letter ISO code like USD/EUR/GBP/JPY), name, impact (high/medium/low), forecast (string or null), previous (string or null). Include all impact levels. No extra text, only the JSON array.";
+      const d = new Date(date + "T12:00:00Z");
+      const dayName = d.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
+      const prompt = "You are an economic calendar database. List the realistic forex economic calendar events for " + dayName + ".\n\nReturn ONLY a valid JSON array — no markdown, no explanation, no extra text. Each object must have exactly these fields:\n- \"time\": \"HH:MM\" in UTC (e.g. \"13:30\")\n- \"currency\": 3-letter ISO code (USD, EUR, GBP, JPY, AUD, CAD, NZD, CHF, CNY)\n- \"name\": official event name (e.g. \"Non-Farm Payrolls\", \"ECB Interest Rate Decision\")\n- \"impact\": \"high\", \"medium\", or \"low\"\n- \"forecast\": forecast value as string, or null\n- \"previous\": previous release value as string, or null\n\nInclude events from all major currencies. Include all impact levels (high, medium, low). If it is a weekend, return an empty array []. Be accurate and realistic based on typical release schedules.";
 
-      const body = JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 2000, messages: [{ role: "user", content: prompt }] });
+      const body = JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 2500,
+        messages: [{ role: "user", content: prompt }]
+      });
       const apiKey = process.env.ANTHROPIC_API_KEY || "";
 
       const aiTxt = await new Promise((resolve, reject) => {
         const r = https.request({
           hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
-          headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) }
+          headers: { "Content-Type": "application/json", "x-api-key": apiKey,
+            "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) }
         }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
         r.on("error", reject); r.write(body); r.end();
       });
 
       const aiData = JSON.parse(aiTxt);
-      const txt = (aiData.content && aiData.content[0]) ? aiData.content[0].text : "";
+      const txt = (aiData.content && aiData.content[0]) ? aiData.content[0].text.trim() : "";
       const match = txt.match(/\[[\s\S]*\]/);
       if (match) {
         const arr = JSON.parse(match[0]);
-        const events = arr.map(e => ({
-          date: date + "T" + (e.time || "00:00") + ":00",
-          currency: e.currency || "", name: e.name || "",
-          impact: (e.impact || "medium").toLowerCase(),
-          actual: null, forecast: e.forecast || null, previous: e.previous || null, source: "AI"
-        }));
-        console.log(`[CAL] AI generated ${events.length} events for ${date}`);
-        return json(res, 200, { events, source: "AI" });
+        if (Array.isArray(arr)) {
+          const events = arr
+            .filter(e => e.currency && e.name)
+            .map(e => ({
+              date:     date + "T" + (e.time || "00:00") + ":00Z",
+              currency: (e.currency || "").toUpperCase(),
+              name:     e.name || "",
+              impact:   (e.impact || "medium").toLowerCase(),
+              actual:   null,
+              forecast: e.forecast ? String(e.forecast) : null,
+              previous: e.previous ? String(e.previous) : null,
+              source:   "AI",
+            }))
+            .sort((a, b) => a.date.localeCompare(b.date));
+          const payload = { events, source: "AI" };
+          global._calCache[date] = payload;
+          console.log("[CAL] AI: " + events.length + " events for " + date);
+          return json(res, 200, payload);
+        }
       }
     } catch(e) { console.warn("[CAL] AI failed:", e.message); }
 
     return json(res, 200, { events: [], source: "none" });
   }
-
 
   // POST /api/briefing  — AI market briefing from news articles
   if (req.method === "POST" && url === "/api/briefing") {
