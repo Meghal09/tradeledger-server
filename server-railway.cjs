@@ -217,27 +217,26 @@ const server = http.createServer(async (req, res) => {
       // If FF failed or empty, use AI to generate whole week at once
       if (allEvents.length === 0) {
         try {
-          const apiKey = process.env.ANTHROPIC_API_KEY || "";
+          const groqKey = process.env.GROQ_API_KEY || "";
           const weekStr = weekKey;
-          const prompt = "You are an economic calendar database. Return the forex economic calendar for the full trading week starting Monday " + weekStr + " (Mon-Fri only).\n\nReturn ONLY a valid JSON array. Each object: \"date\": \"YYYY-MM-DDThh:mm:00Z\", \"currency\": 3-letter ISO, \"name\": event name, \"impact\": high/medium/low, \"forecast\": string or null, \"previous\": string or null.\n\nInclude all 5 days, all major currencies, all impact levels. Be realistic.";
+          const prompt = "You are an economic calendar database. Return the forex economic calendar for the full trading week starting Monday " + weekStr + " (Mon-Fri only).\n\nReturn ONLY a valid JSON array, no markdown, no explanation. Each object must have: date (YYYY-MM-DDThh:mm:00Z), currency (3-letter ISO), name (event name), impact (high/medium/low), forecast (string or null), previous (string or null).\n\nInclude all 5 days, all major currencies, all impact levels. Be realistic.";
 
           const body = JSON.stringify({
-            model: "claude-haiku-4-5-20251001",
+            model: "llama-3.1-8b-instant",
             max_tokens: 4000,
             messages: [{ role: "user", content: prompt }]
           });
 
           const aiTxt = await new Promise((resolve, reject) => {
             const r = https.request({
-              hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
-              headers: { "Content-Type": "application/json", "x-api-key": apiKey,
-                "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) }
+              hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+              headers: { "Content-Type": "application/json", "Authorization": "Bearer " + groqKey, "Content-Length": Buffer.byteLength(body) }
             }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
             r.on("error", reject); r.write(body); r.end();
           });
 
           const aiData = JSON.parse(aiTxt);
-          const txt = (aiData.content && aiData.content[0]) ? aiData.content[0].text.trim() : "";
+          const txt = aiData.choices?.[0]?.message?.content?.trim() || "";
           const match = txt.match(/\[[\s\S]*\]/);
           if (match) {
             const arr = JSON.parse(match[0]);
@@ -336,26 +335,25 @@ const server = http.createServer(async (req, res) => {
     try {
       const d = new Date(date + "T12:00:00Z");
       const dayName = d.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
-      const prompt = "You are an economic calendar database. List the realistic forex economic calendar events for " + dayName + ".\n\nReturn ONLY a valid JSON array — no markdown, no explanation, no extra text. Each object must have exactly these fields:\n- \"time\": \"HH:MM\" in UTC (e.g. \"13:30\")\n- \"currency\": 3-letter ISO code (USD, EUR, GBP, JPY, AUD, CAD, NZD, CHF, CNY)\n- \"name\": official event name (e.g. \"Non-Farm Payrolls\", \"ECB Interest Rate Decision\")\n- \"impact\": \"high\", \"medium\", or \"low\"\n- \"forecast\": forecast value as string, or null\n- \"previous\": previous release value as string, or null\n\nInclude events from all major currencies. Include all impact levels (high, medium, low). If it is a weekend, return an empty array []. Be accurate and realistic based on typical release schedules.";
+      const prompt = "You are an economic calendar database. List realistic forex economic calendar events for " + dayName + ". Return ONLY a valid JSON array, no markdown. Each object: time (HH:MM UTC), currency (3-letter ISO), name (event name), impact (high/medium/low), forecast (string or null), previous (string or null). If weekend, return [].";
 
       const body = JSON.stringify({
-        model: "claude-sonnet-4-20250514",
+        model: "llama-3.1-8b-instant",
         max_tokens: 2500,
         messages: [{ role: "user", content: prompt }]
       });
-      const apiKey = process.env.ANTHROPIC_API_KEY || "";
+      const groqKey = process.env.GROQ_API_KEY || "";
 
       const aiTxt = await new Promise((resolve, reject) => {
         const r = https.request({
-          hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
-          headers: { "Content-Type": "application/json", "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(body) }
+          hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + groqKey, "Content-Length": Buffer.byteLength(body) }
         }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
         r.on("error", reject); r.write(body); r.end();
       });
 
       const aiData = JSON.parse(aiTxt);
-      const txt = (aiData.content && aiData.content[0]) ? aiData.content[0].text.trim() : "";
+      const txt = aiData.choices?.[0]?.message?.content?.trim() || "";
       const match = txt.match(/\[[\s\S]*\]/);
       if (match) {
         const arr = JSON.parse(match[0]);
@@ -408,28 +406,20 @@ const server = http.createServer(async (req, res) => {
 
       const prompt = "You are a forex market analyst. It is " + now + ". Summarise these " + articles.length + " headlines from " + src + " in 3-4 sentences: what is happening, which currencies/pairs are affected, and the near-term directional bias. Be factual and concise — only reference what is in the headlines.\n\nHeadlines:\n" + digest;
 
-      const reqBody = JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 350, messages: [{ role: "user", content: prompt }] });
-      const apiKey = process.env.ANTHROPIC_API_KEY || "";
-
+      const groqKey2 = process.env.GROQ_API_KEY || "";
+      const reqBody = JSON.stringify({ model: "llama-3.1-8b-instant", max_tokens: 350, messages: [{ role: "user", content: prompt }] });
       const https = require("https");
       const aiTxt = await new Promise((resolve, reject) => {
         const r = https.request({
-          hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": apiKey,
-            "anthropic-version": "2023-06-01",
-            "Content-Length": Buffer.byteLength(reqBody)
-          }
+          hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + groqKey2, "Content-Length": Buffer.byteLength(reqBody) }
         }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
-        r.on("error", reject);
-        r.write(reqBody);
-        r.end();
+        r.on("error", reject); r.write(reqBody); r.end();
       });
 
       const aiData = JSON.parse(aiTxt);
       if (aiData.error) return json(res, 500, { error: aiData.error.message });
-      const text = aiData.content && aiData.content[0] ? aiData.content[0].text : "";
+      const text = aiData.choices?.[0]?.message?.content || "";
       if (!text) return json(res, 500, { error: "Empty AI response" });
       return json(res, 200, { briefing: text, generatedAt: new Date().toISOString() });
     } catch(e) {
@@ -438,7 +428,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  // POST /api/analysis  — Weekly AI trade coach analysis
+  // POST /api/analysis  — Weekly AI trade coach (Groq free tier)
   if (req.method === "POST" && url === "/api/analysis") {
     try {
       const body = await new Promise((resolve, reject) => {
@@ -451,36 +441,29 @@ const server = http.createServer(async (req, res) => {
       const s = body.stats;
       if (!s) return json(res, 400, { error: "stats required" });
 
-      const prompt = `You are a professional forex trading coach. Analyse this trader's data and give exactly 3 bullet points.
+      const prompt = "You are a professional forex trading coach. Analyse this trader's data and give exactly 3 bullet points.\n\nDATA:\n- Trades: " + s.total + " | Win rate: " + s.winRate + "% | Net P&L: $" + s.totalProfit + "\n- Profit factor: " + s.pf + " | Expectancy: $" + s.expectancy + " | Avg Win: $" + s.avgWin + " | Avg Loss: $" + s.avgLoss + "\n- Risk:Reward 1:" + s.rr + " | Max drawdown: " + s.maxDD + "% | Max consec losses: " + s.maxCL + "\n- Top symbols: " + (s.bySymbol||[]).slice(0,5).map(x=>x.symbol+":"+x.trades+"t $"+x.profit).join(", ") + "\n- Sessions: " + (s.sessions||"unknown") + "\n\nRespond with EXACTLY 3 bullet points, no intro, no conclusion:\n\u2022 MISTAKES: [specific trading mistakes or weaknesses in the data]\n\u2022 BEST SESSION: [which session to focus on and why]\n\u2022 ADVICE: [1-2 concrete steps to improve next week]";
 
-DATA:
-- Trades: ${s.total} | Win rate: ${s.winRate}% | Net P&L: $${s.totalProfit}
-- Profit factor: ${s.pf} | Expectancy: $${s.expectancy} | Avg Win: $${s.avgWin} | Avg Loss: $${s.avgLoss}
-- Risk:Reward 1:${s.rr} | Max drawdown: ${s.maxDD}% | Max consec losses: ${s.maxCL}
-- Top symbols: ${(s.bySymbol||[]).slice(0,5).map(x=>x.symbol+":"+x.trades+"t $"+x.profit).join(", ")}
-- Sessions: ${s.sessions||"unknown"}
-
-Respond with EXACTLY 3 bullet points, no intro, no conclusion:
-• MISTAKES: [specific trading mistakes or weaknesses in the data]
-• BEST SESSION: [which session (Asian/London/New York) to focus on and why]
-• ADVICE: [1-2 concrete steps to improve next week]`;
-
-      const reqBody = JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 400, messages: [{ role: "user", content: prompt }] });
-      const apiKey = process.env.ANTHROPIC_API_KEY || "";
       const https = require("https");
+      const groqKey = process.env.GROQ_API_KEY || "";
+      const reqBody = JSON.stringify({
+        model: "llama-3.1-8b-instant",
+        max_tokens: 400,
+        messages: [{ role: "user", content: prompt }]
+      });
 
       const aiTxt = await new Promise((resolve, reject) => {
         const r = https.request({
-          hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
-          headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(reqBody) }
+          hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + groqKey, "Content-Length": Buffer.byteLength(reqBody) }
         }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
         r.on("error", reject); r.write(reqBody); r.end();
       });
 
       const aiData = JSON.parse(aiTxt);
       if (aiData.error) return json(res, 500, { error: aiData.error.message });
-      const text = (aiData.content && aiData.content[0]) ? aiData.content[0].text : "";
-      console.log("[ANALYSIS] Generated weekly analysis");
+      const text = aiData.choices?.[0]?.message?.content || "";
+      if (!text) return json(res, 500, { error: "Empty response from Groq" });
+      console.log("[ANALYSIS] Generated via Groq (free)");
       return json(res, 200, { analysis: text, generatedAt: new Date().toISOString() });
     } catch(e) {
       console.warn("[ANALYSIS] Error:", e.message);
