@@ -471,6 +471,113 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
     }
   }
 
+  // GET /api/readarticle?url=...  — Fetch & clean article for reading view
+  if (req.method === "GET" && url.startsWith("/api/readarticle")) {
+    try {
+      const qs = new URLSearchParams(url.split("?")[1]||"");
+      const articleUrl = qs.get("url");
+      if (!articleUrl) return json(res, 400, { error: "url required" });
+
+      const https = require("https");
+      const http = require("http");
+      const { URL: URLClass } = require("url");
+
+      const fetchPage = (pageUrl, redirects=0) => new Promise((resolve, reject) => {
+        if (redirects > 5) { reject(new Error("too many redirects")); return; }
+        const parsed = new URLClass(pageUrl);
+        const lib = parsed.protocol === "https:" ? https : http;
+        const options = {
+          hostname: parsed.hostname,
+          path: parsed.pathname + parsed.search,
+          method: "GET",
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+          timeout: 10000,
+        };
+        const r = lib.request(options, (resp) => {
+          if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) {
+            const loc = resp.headers.location.startsWith("http") ? resp.headers.location : parsed.origin + resp.headers.location;
+            resolve(fetchPage(loc, redirects + 1)); return;
+          }
+          let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve({ html: d, status: resp.statusCode }));
+        });
+        r.on("error", reject);
+        r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+        r.end();
+      });
+
+      const { html, status } = await fetchPage(articleUrl);
+      if (!html || html.length < 200) return json(res, 422, { error: "Empty page" });
+
+      // Extract title
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      const title = titleMatch ? titleMatch[1].replace(/\s*[|\-–—].*$/, "").trim() : "";
+
+      // Extract meta description
+      const descMatch = html.match(/<meta[^>]+(?:name|property)="(?:description|og:description)"[^>]+content="([^"]+)"/i)
+                     || html.match(/<meta[^>]+content="([^"]+)"[^>]+(?:name|property)="(?:description|og:description)"/i);
+      const description = descMatch ? descMatch[1] : "";
+
+      // Extract og:image
+      const imgMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)
+                    || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
+      const image = imgMatch ? imgMatch[1] : "";
+
+      // Extract article body — look for <article>, then <main>, then biggest <div>
+      let body = "";
+      const articleMatch = html.match(/<article[^>]*>([\s\S]*?)<\/article>/i);
+      const mainMatch = html.match(/<main[^>]*>([\s\S]*?)<\/main>/i);
+      const bodySection = articleMatch?.[1] || mainMatch?.[1] || html;
+
+      // Strip scripts, styles, nav, header, footer, aside
+      let clean = bodySection
+        .replace(/<script[\s\S]*?<\/script>/gi, "")
+        .replace(/<style[\s\S]*?<\/style>/gi, "")
+        .replace(/<nav[\s\S]*?<\/nav>/gi, "")
+        .replace(/<header[\s\S]*?<\/header>/gi, "")
+        .replace(/<footer[\s\S]*?<\/footer>/gi, "")
+        .replace(/<aside[\s\S]*?<\/aside>/gi, "")
+        .replace(/<figure[\s\S]*?<\/figure>/gi, "")
+        .replace(/<!--[\s\S]*?-->/g, "");
+
+      // Extract paragraphs
+      const paragraphs = [];
+      const pMatches = clean.match(/<p[^>]*>([\s\S]*?)<\/p>/gi) || [];
+      const h2Matches = clean.match(/<h[1-4][^>]*>([\s\S]*?)<\/h[1-4]>/gi) || [];
+
+      // Interleave headings and paragraphs preserving order
+      const allBlocks = (clean.match(/<(?:p|h[1-4])[^>]*>[\s\S]*?<\/(?:p|h[1-4])>/gi) || [])
+        .map(b => {
+          const isHeading = /^<h[1-4]/i.test(b);
+          const text = b.replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&")
+                        .replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"')
+                        .replace(/&#39;/g, "'").replace(/\s+/g, " ").trim();
+          return text.length > 20 ? { type: isHeading ? "heading" : "paragraph", text } : null;
+        })
+        .filter(Boolean);
+
+      if (allBlocks.length < 3) {
+        // Fallback: strip all HTML and split on double newlines
+        const stripped = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+        const words = stripped.split(" ");
+        // Find article-like content (dense text)
+        for (let i = 0; i < Math.min(words.length, 2000); i += 80) {
+          const chunk = words.slice(i, i+80).join(" ").trim();
+          if (chunk.length > 100) allBlocks.push({ type: "paragraph", text: chunk });
+        }
+      }
+
+      console.log(`[READ] ${articleUrl.slice(0,60)} → ${allBlocks.length} blocks`);
+      return json(res, 200, { title, description, image, blocks: allBlocks.slice(0, 60), source: new URLClass(articleUrl).hostname });
+    } catch(e) {
+      console.warn("[READ] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   // GET /api/news  — Yahoo Finance top stories (server-side, no CORS)
   if (req.method === "GET" && url === "/api/news") {
     try {
