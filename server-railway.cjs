@@ -97,7 +97,8 @@ const server = http.createServer(async (req, res) => {
   setCORS(res);
   if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
-  const url = req.url.split("?")[0];
+  const url = req.url.split("?")[0];   // path only (for routing)
+  const fullUrl = req.url;              // includes ?querystring (for qs parsing)
 
   // GET /api/status
   if (req.method === "GET" && url === "/api/status") {
@@ -382,7 +383,7 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
   // GET /api/quote?symbols=EURUSD,XAUUSD,...  — Yahoo Finance quotes (server-side)
   if (req.method === "GET" && url.startsWith("/api/quote")) {
     try {
-      const qs = new URLSearchParams(url.split("?")[1]||"");
+      const qs = new URLSearchParams(fullUrl.split("?")[1]||"");
       const raw = (qs.get("symbols")||"").split(",").map(s=>s.trim().toUpperCase()).filter(Boolean).slice(0,30);
       if (!raw.length) return json(res, 400, { error: "symbols required" });
 
@@ -474,7 +475,7 @@ Respond with EXACTLY 3 bullet points, no intro, no conclusion:
   // GET /api/readarticle?url=...  — Fetch & clean article for reading view
   if (req.method === "GET" && url.startsWith("/api/readarticle")) {
     try {
-      const qs = new URLSearchParams(url.split("?")[1]||"");
+      const qs = new URLSearchParams(fullUrl.split("?")[1]||"");
       const articleUrl = qs.get("url");
       if (!articleUrl) return json(res, 400, { error: "url required" });
 
