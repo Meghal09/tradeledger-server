@@ -329,6 +329,56 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // POST /api/analysis  — Weekly AI trade coach analysis
+  if (req.method === "POST" && url === "/api/analysis") {
+    try {
+      const body = await new Promise((resolve, reject) => {
+        let d = "";
+        req.on("data", c => d += c);
+        req.on("end", () => { try { resolve(JSON.parse(d)); } catch(e) { reject(e); } });
+        req.on("error", reject);
+      });
+
+      const s = body.stats;
+      if (!s) return json(res, 400, { error: "stats required" });
+
+      const prompt = `You are a professional forex trading coach. Analyse this trader's data and give exactly 3 bullet points.
+
+DATA:
+- Trades: ${s.total} | Win rate: ${s.winRate}% | Net P&L: $${s.totalProfit}
+- Profit factor: ${s.pf} | Expectancy: $${s.expectancy} | Avg Win: $${s.avgWin} | Avg Loss: $${s.avgLoss}
+- Risk:Reward 1:${s.rr} | Max drawdown: ${s.maxDD}% | Max consec losses: ${s.maxCL}
+- Top symbols: ${(s.bySymbol||[]).slice(0,5).map(x=>x.symbol+":"+x.trades+"t $"+x.profit).join(", ")}
+- Sessions: ${s.sessions||"unknown"}
+
+Respond with EXACTLY 3 bullet points, no intro, no conclusion:
+• MISTAKES: [specific trading mistakes or weaknesses in the data]
+• BEST SESSION: [which session (Asian/London/New York) to focus on and why]
+• ADVICE: [1-2 concrete steps to improve next week]`;
+
+      const reqBody = JSON.stringify({ model: "claude-haiku-4-5-20251001", max_tokens: 400, messages: [{ role: "user", content: prompt }] });
+      const apiKey = process.env.ANTHROPIC_API_KEY || "";
+      const https = require("https");
+
+      const aiTxt = await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: "api.anthropic.com", path: "/v1/messages", method: "POST",
+          headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "Content-Length": Buffer.byteLength(reqBody) }
+        }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
+        r.on("error", reject); r.write(reqBody); r.end();
+      });
+
+      const aiData = JSON.parse(aiTxt);
+      if (aiData.error) return json(res, 500, { error: aiData.error.message });
+      const text = (aiData.content && aiData.content[0]) ? aiData.content[0].text : "";
+      console.log("[ANALYSIS] Generated weekly analysis");
+      return json(res, 200, { analysis: text, generatedAt: new Date().toISOString() });
+    } catch(e) {
+      console.warn("[ANALYSIS] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
