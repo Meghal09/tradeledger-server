@@ -1169,6 +1169,10 @@ const server = http.createServer(async (req, res) => {
 
   // GET /api/marketsearch?q=gold  — Search news + AI summary for any market/pair
   if (req.method === "GET" && url.startsWith("/api/marketsearch")) {
+    // Hard timeout: respond within 18s no matter what
+    const searchTimeout = setTimeout(() => {
+      if (!res.headersSent) json(res, 200, { query:"timeout", articles:[], aiSummary:null, generatedAt:new Date().toISOString() });
+    }, 18000);
     try {
       const q = (new URL("http://x" + url).searchParams.get("q") || "").trim().toLowerCase();
       if (!q) return json(res, 400, { error: "Missing query param q" });
@@ -1207,12 +1211,28 @@ const server = http.createServer(async (req, res) => {
         const r = https.request({
           hostname: parsed.hostname, path: parsed.pathname + parsed.search, method: "GET",
           headers: { "User-Agent": "Mozilla/5.0 (compatible; TradeLedger/1.0)", "Accept": "application/rss+xml,*/*" },
-          timeout: 8000,
+          timeout: 5000,
         }, (resp) => {
           if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) { resolve(fetchRSS(resp.headers.location)); return; }
           let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d));
         });
         r.on("error", () => resolve("")); r.on("timeout", () => { r.destroy(); resolve(""); }); r.end();
+      });
+      // Race all feeds — return as soon as ANY gives 5+ results (don't wait for all)
+      const raceFeeds = (urls, labels) => new Promise((resolve) => {
+        let done = false; let results = [];
+        const check = () => { if (!done && results.length === urls.length) { done = true; resolve(results.flat()); } };
+        urls.forEach((u, i) => {
+          fetchRSS(u).then(xml => {
+            if (!xml || xml.includes("Access Denied")) { results.push([]); check(); return; }
+            const items = parseRSS(xml, labels[i]);
+            results.push(items);
+            // If we already have 10+ good items, resolve early
+            const total = results.flat().length;
+            if (!done && total >= 10) { done = true; resolve(results.flat()); }
+            else check();
+          });
+        });
       });
 
       const parseRSS = (xml, label) => {
@@ -1241,14 +1261,9 @@ const server = http.createServer(async (req, res) => {
         return (relevant.length >= 3 ? relevant : scored).slice(0,12);
       };
 
-      // Fetch all RSS sources in parallel
-      const allFeeds = await Promise.allSettled(rssUrls.map((u,i) => fetchRSS(u).then(xml => {
-        if (!xml || xml.includes("Access Denied")) return [];
-        const labels = ["Yahoo Finance","ForexLive","Yahoo Finance"];
-        return parseRSS(xml, labels[i]);
-      })));
-
-      const allArticles = allFeeds.flatMap(r => r.status==="fulfilled" ? r.value : []);
+      // Fetch all RSS sources — resolve as soon as we have enough results
+      const labels = ["Yahoo Finance","ForexLive","Yahoo Finance"];
+      const allArticles = await raceFeeds(rssUrls, labels);
       const relevant = filterRelevant(allArticles, searchTerm);
 
       // Generate AI summary using Groq
@@ -1272,6 +1287,7 @@ const server = http.createServer(async (req, res) => {
         } catch(e) { console.warn("[MARKETSEARCH] AI error:", e.message); }
       }
 
+      clearTimeout(searchTimeout);
       console.log("[MARKETSEARCH] q="+q+" articles="+relevant.length+" ai="+(aiSummary?"yes":"no"));
       return json(res, 200, {
         query: q,
@@ -1280,6 +1296,7 @@ const server = http.createServer(async (req, res) => {
         generatedAt: new Date().toISOString(),
       });
     } catch(e) {
+      clearTimeout(searchTimeout);
       console.warn("[MARKETSEARCH] Error:", e.message);
       return json(res, 500, { error: e.message });
     }
