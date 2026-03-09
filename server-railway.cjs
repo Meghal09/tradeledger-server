@@ -171,21 +171,33 @@ async function fetchQuotes(raw) {
       raw.forEach(s => { if (TD_MAP[s]) tdByOurs[TD_MAP[s]] = s; });
 
       if (tdSymbols.length) {
-        // Fetch price + quote in parallel
-        const [priceResp, quoteResp] = await Promise.all([
-          httpsGet("api.twelvedata.com",
-            "/price?symbol=" + encodeURIComponent(tdSymbols.join(",")) + "&apikey=" + TD_KEY + "&dp=5"),
-          httpsGet("api.twelvedata.com",
-            "/quote?symbol=" + encodeURIComponent(tdSymbols.join(",")) + "&apikey=" + TD_KEY + "&dp=5"),
-        ]);
+        // Twelve Data free tier: max 8 symbols per call — batch if needed
+        const batchSize = 8;
+        const batches = [];
+        for (let i=0; i<tdSymbols.length; i+=batchSize) batches.push(tdSymbols.slice(i,i+batchSize));
+        const allPriceMap = {}, allQuoteMap = {};
+        for (const batch of batches) {
+          const [priceResp, quoteResp] = await Promise.all([
+            httpsGet("api.twelvedata.com",
+              "/price?symbol=" + encodeURIComponent(batch.join(",")) + "&apikey=" + TD_KEY + "&dp=5"),
+            httpsGet("api.twelvedata.com",
+              "/quote?symbol=" + encodeURIComponent(batch.join(",")) + "&apikey=" + TD_KEY + "&dp=5"),
+          ]);
+          const isSingle = batch.length===1;
+          if (priceResp.status===200) {
+            const pm = isSingle ? {[batch[0]]:JSON.parse(priceResp.text)} : JSON.parse(priceResp.text);
+            Object.assign(allPriceMap, pm);
+          }
+          if (quoteResp.status===200) {
+            const qm = isSingle ? {[batch[0]]:JSON.parse(quoteResp.text)} : JSON.parse(quoteResp.text);
+            Object.assign(allQuoteMap, qm);
+          }
+        }
+        const [priceResp, quoteResp] = [{status:200,text:"batched"},{status:200,text:"batched"}];
+        const isSingle = false;
+        const priceMap = allPriceMap, quoteMap = allQuoteMap;
 
-        const isSingle = tdSymbols.length === 1;
-        const priceMap = priceResp.status===200 ? (isSingle
-          ? { [tdSymbols[0]]: JSON.parse(priceResp.text) }
-          : JSON.parse(priceResp.text)) : {};
-        const quoteMap = quoteResp.status===200 ? (isSingle
-          ? { [tdSymbols[0]]: JSON.parse(quoteResp.text) }
-          : JSON.parse(quoteResp.text)) : {};
+
 
         tdSymbols.forEach(tdSym => {
           const ourSym = tdByOurs[tdSym];
@@ -276,6 +288,38 @@ async function fetchQuotes(raw) {
         console.log("[QUOTE] Frankfurter fallback:", ffNeeded.filter(s=>out[s]).length);
       }
     } catch(e) { console.warn("[QUOTE] Frankfurter failed:", e.message); }
+  }
+
+  // ── SOURCE 4: Yahoo Finance fallback for indices/oil (TD rate-limited) ──
+  const yahooNeeded = raw.filter(s => out[s]===null &&
+    ["NAS100","SPX500","US30","USOIL","UKOIL","UK100","GER40","JPN225","NAS100"].includes(s));
+  if (yahooNeeded.length) {
+    try {
+      const YH_MAP = {
+        "NAS100":"^NDX","SPX500":"^GSPC","US30":"^DJI",
+        "USOIL":"CL=F","UKOIL":"BZ=F","UK100":"^FTSE",
+        "GER40":"^GDAXI","JPN225":"^N225","AUS200":"^AXJO",
+      };
+      for (const sym of yahooNeeded) {
+        const yhSym = YH_MAP[sym]; if (!yhSym) continue;
+        try {
+          const resp = await httpsGet("query1.finance.yahoo.com",
+            "/v8/finance/chart/"+encodeURIComponent(yhSym)+"?interval=1d&range=2d");
+          if (resp.status!==200) continue;
+          const data = JSON.parse(resp.text);
+          const meta = data?.chart?.result?.[0]?.meta;
+          if (!meta) continue;
+          const price = meta.regularMarketPrice;
+          const prev  = meta.previousClose || meta.chartPreviousClose;
+          if (!price) continue;
+          const dec = getDec(sym);
+          const chg = prev ? price - prev : 0;
+          const chgP = prev ? (chg/prev)*100 : 0;
+          out[sym] = { price:fmt(price,dec), change:fmt(chg,dec), changePct:fmt(chgP,2), high:null, low:null, prevClose:fmt(prev,dec) };
+        } catch(e) { /* skip this symbol */ }
+      }
+      console.log("[QUOTE] Yahoo fallback:", yahooNeeded.filter(s=>out[s]).length);
+    } catch(e) { console.warn("[QUOTE] Yahoo fallback failed:", e.message); }
   }
 
   console.log("[QUOTE] Final:", raw.filter(s=>out[s]!==null).length+"/"+raw.length+" filled");
