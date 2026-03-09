@@ -1166,6 +1166,125 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+
+  // GET /api/marketsearch?q=gold  — Search news + AI summary for any market/pair
+  if (req.method === "GET" && url.startsWith("/api/marketsearch")) {
+    try {
+      const q = (new URL("http://x" + url).searchParams.get("q") || "").trim().toLowerCase();
+      if (!q) return json(res, 400, { error: "Missing query param q" });
+
+      const https = require("https");
+
+      // Map common pair names to search terms
+      const synonyms = {
+        "gold":"gold XAU forex","xauusd":"gold XAU price","xau":"gold XAU market",
+        "silver":"silver XAG forex","xagusd":"silver XAG","btc":"bitcoin crypto",
+        "bitcoin":"bitcoin BTC","eth":"ethereum crypto","ethereum":"ethereum ETH",
+        "eurusd":"EUR USD euro dollar forex","eur":"euro EUR forex",
+        "gbpusd":"GBP USD pound dollar forex","gbp":"British pound GBP",
+        "usdjpy":"USD JPY dollar yen forex","jpy":"Japanese yen JPY",
+        "gbpjpy":"GBP JPY pound yen forex","audusd":"AUD USD Australian dollar",
+        "usdchf":"USD CHF dollar franc","usdcad":"USD CAD dollar Canadian",
+        "nzdusd":"NZD USD New Zealand dollar","oil":"crude oil WTI price",
+        "usoil":"crude oil WTI","nas100":"nasdaq 100 tech stocks",
+        "nasdaq":"nasdaq 100 stocks","sp500":"S&P 500 US stocks",
+        "us30":"dow jones industrial","dow":"dow jones stocks",
+        "dxy":"US dollar index DXY","dollar":"US dollar DXY forex",
+        "fed":"Federal Reserve interest rates","nfp":"non-farm payrolls jobs report",
+        "cpi":"inflation CPI consumer prices","fomc":"Federal Reserve FOMC meeting",
+      };
+      const searchTerm = synonyms[q] || (q + " forex market news");
+
+      // Fetch Yahoo Finance RSS search
+      const rssUrls = [
+        "https://finance.yahoo.com/news/rssindex",
+        "https://www.forexlive.com/feed/news",
+        "https://feeds.finance.yahoo.com/rss/2.0/headline?s=^GSPC&region=US&lang=en-US",
+      ];
+
+      const fetchRSS = (rssUrl) => new Promise((resolve) => {
+        const parsed = new URL(rssUrl);
+        const r = https.request({
+          hostname: parsed.hostname, path: parsed.pathname + parsed.search, method: "GET",
+          headers: { "User-Agent": "Mozilla/5.0 (compatible; TradeLedger/1.0)", "Accept": "application/rss+xml,*/*" },
+          timeout: 8000,
+        }, (resp) => {
+          if (resp.statusCode >= 300 && resp.statusCode < 400 && resp.headers.location) { resolve(fetchRSS(resp.headers.location)); return; }
+          let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d));
+        });
+        r.on("error", () => resolve("")); r.on("timeout", () => { r.destroy(); resolve(""); }); r.end();
+      });
+
+      const parseRSS = (xml, label) => {
+        const items = [];
+        const itemMatches = xml.match(/<item>([\s\S]*?)<\/item>/g) || [];
+        for (const item of itemMatches.slice(0, 30)) {
+          const title = (item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/) || item.match(/<title>(.*?)<\/title>/) || [])[1]?.trim() || "";
+          const link  = (item.match(/<link>(.*?)<\/link>/) || [])[1]?.trim() || "";
+          const desc  = ((item.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/) || item.match(/<description>(.*?)<\/description>/) || [])[1] || "").replace(/<[^>]*>/g,"").trim().slice(0,220);
+          const pub   = (item.match(/<pubDate>(.*?)<\/pubDate>/) || [])[1]?.trim() || "";
+          if (title.length > 8) items.push({ title, link, description: desc, pubDate: pub, source: label });
+        }
+        return items;
+      };
+
+      // Filter articles relevant to the query
+      const filterRelevant = (articles, query) => {
+        const words = query.toLowerCase().split(" ").filter(w => w.length > 2);
+        const scored = articles.map(a => {
+          const text = (a.title + " " + a.description).toLowerCase();
+          const score = words.reduce((s, w) => s + (text.includes(w) ? 1 : 0), 0);
+          return { ...a, _score: score };
+        });
+        const relevant = scored.filter(a => a._score > 0).sort((a,b) => b._score - a._score);
+        // If we have relevant results, return them; otherwise return all (might be about the topic anyway)
+        return (relevant.length >= 3 ? relevant : scored).slice(0,12);
+      };
+
+      // Fetch all RSS sources in parallel
+      const allFeeds = await Promise.allSettled(rssUrls.map((u,i) => fetchRSS(u).then(xml => {
+        if (!xml || xml.includes("Access Denied")) return [];
+        const labels = ["Yahoo Finance","ForexLive","Yahoo Finance"];
+        return parseRSS(xml, labels[i]);
+      })));
+
+      const allArticles = allFeeds.flatMap(r => r.status==="fulfilled" ? r.value : []);
+      const relevant = filterRelevant(allArticles, searchTerm);
+
+      // Generate AI summary using Groq
+      let aiSummary = null;
+      const groqKey = process.env.GROQ_API_KEY || "";
+      if (groqKey && relevant.length > 0) {
+        try {
+          const digest = relevant.slice(0,10).map((a,i) => (i+1)+". "+a.title+(a.description?" — "+a.description.slice(0,120):"")).join("\n");
+          const now = new Date().toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",timeZone:"UTC"})+" UTC";
+          const prompt = "You are a professional forex/market analyst. It is "+now+". A trader just searched for '"+q.toUpperCase()+"'.\n\nBased on these recent headlines, give a sharp 3-4 sentence market briefing about "+q.toUpperCase()+" right now: what is the current situation, what key factors are driving it, and what is the near-term bias (bullish/bearish/neutral). Be specific and concise.\n\nHeadlines:\n"+digest;
+          const reqBody = JSON.stringify({ model:"llama-3.1-8b-instant", max_tokens:300, messages:[{role:"user",content:prompt}] });
+          const aiText = await new Promise((resolve, reject) => {
+            const r = https.request({
+              hostname:"api.groq.com", path:"/openai/v1/chat/completions", method:"POST",
+              headers:{"Content-Type":"application/json","Authorization":"Bearer "+groqKey,"Content-Length":Buffer.byteLength(reqBody)}
+            }, (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve(d)); });
+            r.on("error", reject); r.write(reqBody); r.end();
+          });
+          const aiData = JSON.parse(aiText);
+          aiSummary = aiData.choices?.[0]?.message?.content || null;
+        } catch(e) { console.warn("[MARKETSEARCH] AI error:", e.message); }
+      }
+
+      console.log("[MARKETSEARCH] q="+q+" articles="+relevant.length+" ai="+(aiSummary?"yes":"no"));
+      return json(res, 200, {
+        query: q,
+        articles: relevant,
+        aiSummary,
+        generatedAt: new Date().toISOString(),
+      });
+    } catch(e) {
+      console.warn("[MARKETSEARCH] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
