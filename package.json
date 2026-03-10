@@ -1,7 +1,7 @@
 {
   "name": "tradeledger-server",
   "version": "1.0.0",
-  "description": "TradeLedger MT5 sync backend",
+  "description": "TradeLedger Railway backend",
   "main": "server-railway.cjs",
   "scripts": {
     "start": "node server-railway.cjs"
