@@ -4,7 +4,8 @@
   "description": "TradeLedger Railway backend",
   "main": "server-railway.cjs",
   "scripts": {
-    "start": "node server-railway.cjs"
+    "start": "node server-railway.cjs",
+    "build": "echo 'No build step required'"
   },
   "engines": {
     "node": ">=18.0.0"

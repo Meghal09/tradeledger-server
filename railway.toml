@@ -1,0 +1,8 @@
+[build]
+builder = "NIXPACKS"
+buildCommand = "echo 'No build needed'"
+
+[deploy]
+startCommand = "node server-railway.cjs"
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
