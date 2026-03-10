@@ -463,7 +463,7 @@ const server = http.createServer(async (req, res) => {
 
           const aiTxt = await new Promise((resolve, reject) => {
             const r = https.request({
-              hostname: "api.groq.com", path: "/openai/v1/chat/completions", method: "POST",
+              hostname: "api.openai.com", path: "/openai/v1/chat/completions", method: "POST",
               headers: { "Content-Type": "application/json", "Authorization": "Bearer " + groqKey, "Content-Length": Buffer.byteLength(body) }
             }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
             r.on("error", reject); r.write(body); r.end();
