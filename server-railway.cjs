@@ -1073,13 +1073,48 @@ const server = http.createServer(async (req, res) => {
       const symLines = rawSyms.map(s=>{
         const m = ASSET_META[s]||{name:s,type:"instrument"};
         const lp = livePrices[s];
+        const pip = m.type==="crypto" ? (lp?.price > 1000 ? 1 : 0.01) : m.type==="commodity" ? (s==="XAUUSD"?0.1:0.001) : 0.0001;
         const priceStr = lp
-          ? `CURRENT LIVE PRICE: ${lp.price} (24h change: ${lp.changeP>0?"+":""}${lp.changeP}%)`
-          : "current price: unknown — use realistic estimate";
-        return `- ${s} (${m.name}): ${priceStr}`;
+          ? `LIVE PRICE: ${lp.price} | 24h change: ${lp.changeP>0?"+":""}${lp.changeP}%`
+          : "price: unknown — use your best realistic estimate";
+        return `- ${s} (${m.name}, type: ${m.type}): ${priceStr}`;
       }).join("\n");
 
-      const prompt = "You are a professional market analyst. Today is " + dateStr + ".\n\nHere are the REAL CURRENT LIVE PRICES as of right now — your predictions MUST use these as the starting point:\n" + symLines + "\n\nGenerate analyst-style predictions for exactly these " + rawSyms.length + " instruments. Your targets, support, and resistance levels MUST be close to the current prices above (not historical levels). For example if BTC is at $67,000 then targets should be in the $60k-$75k range, NOT $40k-$50k range.\n\nRespond ONLY with a valid JSON array of exactly " + rawSyms.length + " objects, no markdown, no extra text:\n[\n  {\n    \"asset\": \"SYMBOL (exact symbol from input)\",\n    \"name\": \"Asset Name\",\n    \"currentPrice\": <the live price number from above>,\n    \"bias\": \"bullish|bearish|neutral\",\n    \"target\": <realistic target NEAR current price, max 3-5% away>,\n    \"support\": <key support BELOW current price>,\n    \"resistance\": <key resistance ABOVE current price>,\n    \"confidence\": <55-85 integer>,\n    \"timeframe\": \"Today\" or \"This Week\",\n    \"catalyst\": \"<1-sentence specific market reason>\",\n    \"analyst\": \"<realistic firm: Goldman Sachs, JPMorgan, Citi, Morgan Stanley, Deutsche Bank, UBS, Barclays>\",\n    \"signal\": \"BUY|SELL|HOLD\"\n  }\n]";
+      const now2 = new Date();
+      const utcH = now2.getUTCHours();
+      const sessionCtx = utcH>=0&&utcH<8?"Asian session active":utcH>=8&&utcH<13?"London session active":utcH>=13&&utcH<17?"London/NY overlap — highest volatility":utcH>=17&&utcH<22?"New York session active":"off-hours — low liquidity";
+
+      const prompt = `You are a senior FX and multi-asset analyst. Today is ${dateStr}. Current market session: ${sessionCtx}.
+
+LIVE MARKET PRICES (verified real-time data):
+${symLines}
+
+Task: Generate intraday/short-term technical bias for each instrument above.
+
+Rules:
+1. support and resistance MUST be realistic key levels near the current price (within 0.5% for forex, 2% for gold, 5% for crypto)
+2. target MUST be between current price and the resistance (for BUY) or between support and current price (for SELL)
+3. confidence should reflect genuine uncertainty — range 52-78 only. Never above 80.
+4. bias the signal toward the session context (e.g. JPY pairs are more active in Asian session)
+5. catalyst must be a real, specific, plausible reason — not generic phrases like "market sentiment"
+6. Do NOT copy historical price levels — all levels must be within the ranges implied by the live prices above
+
+Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no markdown, no preamble:
+[
+  {
+    "asset": "<exact symbol>",
+    "name": "<Asset Name>",
+    "currentPrice": <live price number from above>,
+    "bias": "bullish|bearish|neutral",
+    "signal": "BUY|SELL|HOLD",
+    "target": <number — realistic intraday target>,
+    "support": <number — key support level below current price>,
+    "resistance": <number — key resistance level above current price>,
+    "confidence": <integer 52-78>,
+    "timeframe": "Today",
+    "catalyst": "<specific 1-sentence reason based on session, recent 24h move, or macro context>"
+  }
+]`;
 
       const txt = await groqChat([{ role: "user", content: prompt }], { maxTokens: 900 });
       const match = txt.match(/\[[\s\S]*\]/);
