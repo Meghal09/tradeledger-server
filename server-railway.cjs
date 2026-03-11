@@ -8,6 +8,50 @@ const http = require("http");
 const fs   = require("fs");
 const path = require("path");
 
+// ─── Gemini AI helper (free, replaces OpenAI everywhere) ─────────────────────
+// Get free key at aistudio.google.com — set GEMINI_API_KEY in Railway Variables
+async function groqChat(messages, { maxTokens = 1024 } = {}) {
+  const https = require("https");
+  const key = process.env.GEMINI_API_KEY || "";
+  if (!key) throw new Error("GEMINI_API_KEY not set in Railway environment variables");
+
+  // Convert OpenAI-style messages to Gemini format
+  const contents = messages.map(m => ({
+    role: m.role === "assistant" ? "model" : "user",
+    parts: [{ text: m.content }]
+  }));
+
+  const body = JSON.stringify({
+    contents,
+    generationConfig: { maxOutputTokens: maxTokens }
+  });
+
+  return new Promise((resolve, reject) => {
+    const r = https.request({
+      hostname: "generativelanguage.googleapis.com",
+      path: "/v1beta/models/gemini-2.0-flash:generateContent?key=" + key,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (resp) => {
+      let d = "";
+      resp.on("data", c => d += c);
+      resp.on("end", () => {
+        try {
+          const parsed = JSON.parse(d);
+          if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+          resolve(parsed.candidates?.[0]?.content?.parts?.[0]?.text || "");
+        } catch (e) { reject(e); }
+      });
+    });
+    r.on("error", reject);
+    r.write(body);
+    r.end();
+  });
+}
+
 const PORT      = process.env.PORT || 3001;
 const TOKEN_KEY = "TRADELEDGER_TOKEN";
 
@@ -451,26 +495,10 @@ const server = http.createServer(async (req, res) => {
       // If FF failed or empty, use AI to generate whole week at once
       if (allEvents.length === 0) {
         try {
-          const openaiKey = process.env.OPENAI_API_KEY || "";
           const weekStr = weekKey;
           const prompt = "You are an economic calendar database. Return the forex economic calendar for the full trading week starting Monday " + weekStr + " (Mon-Fri only).\n\nReturn ONLY a valid JSON array, no markdown, no explanation. Each object must have: date (YYYY-MM-DDThh:mm:00Z), currency (3-letter ISO), name (event name), impact (high/medium/low), forecast (string or null), previous (string or null).\n\nInclude all 5 days, all major currencies, all impact levels. Be realistic.";
 
-          const body = JSON.stringify({
-            model: "gpt-4o-mini",
-            max_tokens: 4000,
-            messages: [{ role: "user", content: prompt }]
-          });
-
-          const aiTxt = await new Promise((resolve, reject) => {
-            const r = https.request({
-              hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST",
-              headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey, "Content-Length": Buffer.byteLength(body) }
-            }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
-            r.on("error", reject); r.write(body); r.end();
-          });
-
-          const aiData = JSON.parse(aiTxt);
-          const txt = aiData.choices?.[0]?.message?.content?.trim() || "";
+          const txt = await groqChat([{ role: "user", content: prompt }], { maxTokens: 4000 });
           const match = txt.match(/\[[\s\S]*\]/);
           if (match) {
             const arr = JSON.parse(match[0]);
@@ -571,23 +599,7 @@ const server = http.createServer(async (req, res) => {
       const dayName = d.toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
       const prompt = "You are an economic calendar database. List realistic forex economic calendar events for " + dayName + ". Return ONLY a valid JSON array, no markdown. Each object: time (HH:MM UTC), currency (3-letter ISO), name (event name), impact (high/medium/low), forecast (string or null), previous (string or null). If weekend, return [].";
 
-      const body = JSON.stringify({
-        model: "gpt-4o-mini",
-        max_tokens: 2500,
-        messages: [{ role: "user", content: prompt }]
-      });
-      const openaiKey = process.env.OPENAI_API_KEY || "";
-
-      const aiTxt = await new Promise((resolve, reject) => {
-        const r = https.request({
-          hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey, "Content-Length": Buffer.byteLength(body) }
-        }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
-        r.on("error", reject); r.write(body); r.end();
-      });
-
-      const aiData = JSON.parse(aiTxt);
-      const txt = aiData.choices?.[0]?.message?.content?.trim() || "";
+      const txt = await groqChat([{ role: "user", content: prompt }], { maxTokens: 2500 });
       const match = txt.match(/\[[\s\S]*\]/);
       if (match) {
         const arr = JSON.parse(match[0]);
@@ -640,20 +652,7 @@ const server = http.createServer(async (req, res) => {
 
       const prompt = "You are a forex market analyst. It is " + now + ". Summarise these " + articles.length + " headlines from " + src + " in 3-4 sentences: what is happening, which currencies/pairs are affected, and the near-term directional bias. Be factual and concise — only reference what is in the headlines.\n\nHeadlines:\n" + digest;
 
-      const openaiKey2 = process.env.OPENAI_API_KEY || "";
-      const reqBody = JSON.stringify({ model: "gpt-4o-mini", max_tokens: 350, messages: [{ role: "user", content: prompt }] });
-      const https = require("https");
-      const aiTxt = await new Promise((resolve, reject) => {
-        const r = https.request({
-          hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey2, "Content-Length": Buffer.byteLength(reqBody) }
-        }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
-        r.on("error", reject); r.write(reqBody); r.end();
-      });
-
-      const aiData = JSON.parse(aiTxt);
-      if (aiData.error) return json(res, 500, { error: aiData.error.message });
-      const text = aiData.choices?.[0]?.message?.content || "";
+      const text = await groqChat([{ role: "user", content: prompt }], { maxTokens: 350 });
       if (!text) return json(res, 500, { error: "Empty AI response" });
       return json(res, 200, { briefing: text, generatedAt: new Date().toISOString() });
     } catch(e) {
@@ -677,27 +676,9 @@ const server = http.createServer(async (req, res) => {
 
       const prompt = "You are a professional forex trading coach. Analyse this trader's data and give exactly 3 bullet points.\n\nDATA:\n- Trades: " + s.total + " | Win rate: " + s.winRate + "% | Net P&L: $" + s.totalProfit + "\n- Profit factor: " + s.pf + " | Expectancy: $" + s.expectancy + " | Avg Win: $" + s.avgWin + " | Avg Loss: $" + s.avgLoss + "\n- Risk:Reward 1:" + s.rr + " | Max drawdown: " + s.maxDD + "% | Max consec losses: " + s.maxCL + "\n- Top symbols: " + (s.bySymbol||[]).slice(0,5).map(x=>x.symbol+":"+x.trades+"t $"+x.profit).join(", ") + "\n- Sessions: " + (s.sessions||"unknown") + "\n\nRespond with EXACTLY 3 bullet points, no intro, no conclusion:\n\u2022 MISTAKES: [specific trading mistakes or weaknesses in the data]\n\u2022 BEST SESSION: [which session to focus on and why]\n\u2022 ADVICE: [1-2 concrete steps to improve next week]";
 
-      const https = require("https");
-      const openaiKey = process.env.OPENAI_API_KEY || "";
-      const reqBody = JSON.stringify({
-        model: "gpt-4o-mini",
-        max_tokens: 400,
-        messages: [{ role: "user", content: prompt }]
-      });
-
-      const aiTxt = await new Promise((resolve, reject) => {
-        const r = https.request({
-          hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey, "Content-Length": Buffer.byteLength(reqBody) }
-        }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
-        r.on("error", reject); r.write(reqBody); r.end();
-      });
-
-      const aiData = JSON.parse(aiTxt);
-      if (aiData.error) return json(res, 500, { error: aiData.error.message });
-      const text = aiData.choices?.[0]?.message?.content || "";
-      if (!text) return json(res, 500, { error: "Empty response from OpenAI" });
-      console.log("[ANALYSIS] Generated via OpenAI");
+      const text = await groqChat([{ role: "user", content: prompt }], { maxTokens: 400 });
+      if (!text) return json(res, 500, { error: "Empty response from Groq" });
+      console.log("[ANALYSIS] Generated via Groq");
       return json(res, 200, { analysis: text, generatedAt: new Date().toISOString() });
     } catch(e) {
       console.warn("[ANALYSIS] Error:", e.message);
@@ -955,8 +936,8 @@ const server = http.createServer(async (req, res) => {
       }
       if (forceBust) { delete global._predCache[cacheKey]; console.log("[PRED] Cache busted for", cacheKey); }
 
-      const openaiKey = process.env.OPENAI_API_KEY || "";
-      if (!openaiKey) return json(res, 200, { predictions: [], error: "OPENAI_API_KEY not set" });
+      const geminiKey = process.env.GEMINI_API_KEY || "";
+      if (!geminiKey) return json(res, 200, { predictions: [], error: "GEMINI_API_KEY not set in Railway Variables" });
 
       const https = require("https");
       const now = new Date();
@@ -1100,23 +1081,7 @@ const server = http.createServer(async (req, res) => {
 
       const prompt = "You are a professional market analyst. Today is " + dateStr + ".\n\nHere are the REAL CURRENT LIVE PRICES as of right now — your predictions MUST use these as the starting point:\n" + symLines + "\n\nGenerate analyst-style predictions for exactly these " + rawSyms.length + " instruments. Your targets, support, and resistance levels MUST be close to the current prices above (not historical levels). For example if BTC is at $67,000 then targets should be in the $60k-$75k range, NOT $40k-$50k range.\n\nRespond ONLY with a valid JSON array of exactly " + rawSyms.length + " objects, no markdown, no extra text:\n[\n  {\n    \"asset\": \"SYMBOL (exact symbol from input)\",\n    \"name\": \"Asset Name\",\n    \"currentPrice\": <the live price number from above>,\n    \"bias\": \"bullish|bearish|neutral\",\n    \"target\": <realistic target NEAR current price, max 3-5% away>,\n    \"support\": <key support BELOW current price>,\n    \"resistance\": <key resistance ABOVE current price>,\n    \"confidence\": <55-85 integer>,\n    \"timeframe\": \"Today\" or \"This Week\",\n    \"catalyst\": \"<1-sentence specific market reason>\",\n    \"analyst\": \"<realistic firm: Goldman Sachs, JPMorgan, Citi, Morgan Stanley, Deutsche Bank, UBS, Barclays>\",\n    \"signal\": \"BUY|SELL|HOLD\"\n  }\n]";
 
-      const body = JSON.stringify({
-        model: "gpt-4o-mini",
-        max_tokens: 900,
-        messages: [{ role: "user", content: prompt }]
-      });
-
-      const aiTxt = await new Promise((resolve, reject) => {
-        const r = https.request({
-          hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST",
-          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey, "Content-Length": Buffer.byteLength(body) }
-        }, (resp) => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
-        r.on("error", reject);
-        r.write(body); r.end();
-      });
-
-      const aiData = JSON.parse(aiTxt);
-      const txt = aiData.choices?.[0]?.message?.content?.trim() || "";
+      const txt = await groqChat([{ role: "user", content: prompt }], { maxTokens: 900 });
       const match = txt.match(/\[[\s\S]*\]/);
       if (!match) return json(res, 200, { predictions: [], error: "Parse failed: " + txt.slice(0,120) });
 
@@ -1310,24 +1275,14 @@ const server = http.createServer(async (req, res) => {
       const allArticles = await raceFeeds(rssUrls, labels);
       const relevant = filterRelevant(allArticles, searchTerm);
 
-      // Generate AI summary using OpenAI
+      // Generate AI summary using Groq
       let aiSummary = null;
-      const openaiKey = process.env.OPENAI_API_KEY || "";
-      if (openaiKey && relevant.length > 0) {
+      if (relevant.length > 0) {
         try {
           const digest = relevant.slice(0,10).map((a,i) => (i+1)+". "+a.title+(a.description?" — "+a.description.slice(0,120):"")).join("\n");
           const now = new Date().toLocaleString("en-US",{weekday:"short",month:"short",day:"numeric",hour:"2-digit",minute:"2-digit",timeZone:"UTC"})+" UTC";
           const prompt = "You are a professional forex/market analyst. It is "+now+". A trader just searched for '"+q.toUpperCase()+"'.\n\nBased on these recent headlines, give a sharp 3-4 sentence market briefing about "+q.toUpperCase()+" right now: what is the current situation, what key factors are driving it, and what is the near-term bias (bullish/bearish/neutral). Be specific and concise.\n\nHeadlines:\n"+digest;
-          const reqBody = JSON.stringify({ model:"gpt-4o-mini", max_tokens:300, messages:[{role:"user",content:prompt}] });
-          const aiText = await new Promise((resolve, reject) => {
-            const r = https.request({
-              hostname:"api.openai.com", path:"/v1/chat/completions", method:"POST",
-              headers:{"Content-Type":"application/json","Authorization":"Bearer "+openaiKey,"Content-Length":Buffer.byteLength(reqBody)}
-            }, (resp) => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve(d)); });
-            r.on("error", reject); r.write(reqBody); r.end();
-          });
-          const aiData = JSON.parse(aiText);
-          aiSummary = aiData.choices?.[0]?.message?.content || null;
+          aiSummary = await groqChat([{ role: "user", content: prompt }], { maxTokens: 300 });
         } catch(e) { console.warn("[MARKETSEARCH] AI error:", e.message); }
       }
 
