@@ -29,7 +29,7 @@ async function groqChat(messages, { maxTokens = 1024 } = {}) {
   return new Promise((resolve, reject) => {
     const r = https.request({
       hostname: "generativelanguage.googleapis.com",
-      path: "/v1beta/models/gemini-2.0-flash:generateContent?key=" + key,
+      path: "/v1beta/models/gemini-1.5-flash:generateContent?key=" + key,
       method: "POST",
       headers: {
         "Content-Type": "application/json",
