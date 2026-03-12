@@ -40,13 +40,25 @@ async function groqChat(messages, { maxTokens = 1024 } = {}) {
       resp.on("data", c => d += c);
       resp.on("end", () => {
         try {
+          console.log("[AI] Gemini status:", resp.statusCode, "body len:", d.length);
           const parsed = JSON.parse(d);
-          if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
-          resolve(parsed.candidates?.[0]?.content?.parts?.[0]?.text || "");
-        } catch (e) { reject(e); }
+          if (parsed.error) {
+            console.error("[AI] Gemini error:", JSON.stringify(parsed.error));
+            throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+          }
+          const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          if (!text) console.warn("[AI] Gemini returned empty text. Full response:", d.slice(0, 500));
+          resolve(text);
+        } catch (e) {
+          console.error("[AI] Gemini parse error:", e.message, "raw:", d.slice(0, 300));
+          reject(e);
+        }
       });
     });
-    r.on("error", reject);
+    r.on("error", (e) => {
+      console.error("[AI] Gemini network error:", e.message);
+      reject(e);
+    });
     r.write(body);
     r.end();
   });
@@ -722,7 +734,17 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { results, timestamp: new Date().toISOString() });
   }
 
-  // GET /api/quote?symbols=EURUSD,XAUUSD,...
+  // GET /api/ai-debug — test Gemini API key and connectivity
+  if (req.method === "GET" && url === "/api/ai-debug") {
+    const key = process.env.GEMINI_API_KEY || "";
+    if (!key) return json(res, 200, { ok: false, error: "GEMINI_API_KEY is not set in Railway Variables", fix: "Go to Railway → your service → Variables → add GEMINI_API_KEY" });
+    try {
+      const result = await groqChat([{ role: "user", content: "Reply with exactly: OK" }], { maxTokens: 10 });
+      return json(res, 200, { ok: true, response: result, keyPrefix: key.slice(0,8)+"..." });
+    } catch(e) {
+      return json(res, 200, { ok: false, error: e.message, keyPrefix: key.slice(0,8)+"...", fix: "Check your GEMINI_API_KEY is valid at aistudio.google.com" });
+    }
+  }
   // Sources: 1) Twelve Data (primary) 2) CoinGecko (crypto fallback) 3) Frankfurter (forex/metals fallback)
   // Strategy: stale-while-revalidate — serve cached data immediately, refresh in background
   if (req.method === "GET" && url.startsWith("/api/quote")) {
