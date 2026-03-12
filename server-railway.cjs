@@ -8,60 +8,104 @@ const http = require("http");
 const fs   = require("fs");
 const path = require("path");
 
-// ─── Gemini AI helper (free, replaces OpenAI everywhere) ─────────────────────
-// Get free key at aistudio.google.com — set GEMINI_API_KEY in Railway Variables
+// ─── AI helper — OpenRouter (free tier, OpenAI-compatible format) ────────────
+// Get free key at openrouter.ai — set OPENROUTER_API_KEY in Railway Variables
+// Free models: meta-llama/llama-3.3-8b-instruct:free  (fast, good quality)
+//              mistralai/mistral-7b-instruct:free      (fallback)
+const AI_MODELS = [
+  "meta-llama/llama-3.3-8b-instruct:free",
+  "mistralai/mistral-7b-instruct:free",
+  "google/gemma-2-9b-it:free",
+];
+
 async function groqChat(messages, { maxTokens = 1024 } = {}) {
   const https = require("https");
-  const key = process.env.GEMINI_API_KEY || "";
-  if (!key) throw new Error("GEMINI_API_KEY not set in Railway environment variables");
 
-  // Convert OpenAI-style messages to Gemini format
-  const contents = messages.map(m => ({
-    role: m.role === "assistant" ? "model" : "user",
-    parts: [{ text: m.content }]
-  }));
+  // Try OpenRouter first (free, reliable)
+  const orKey = process.env.OPENROUTER_API_KEY || "";
+  if (orKey) {
+    for (const model of AI_MODELS) {
+      try {
+        const body = JSON.stringify({
+          model,
+          messages,
+          max_tokens: maxTokens,
+          temperature: 0.7,
+        });
+        const result = await new Promise((resolve, reject) => {
+          const r = https.request({
+            hostname: "openrouter.ai",
+            path: "/api/v1/chat/completions",
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": "Bearer " + orKey,
+              "HTTP-Referer": "https://tradeledger.app",
+              "X-Title": "TradeLedger",
+              "Content-Length": Buffer.byteLength(body),
+            },
+          }, (resp) => {
+            let d = "";
+            resp.on("data", c => d += c);
+            resp.on("end", () => {
+              try {
+                console.log("[AI] OpenRouter status:", resp.statusCode, "model:", model);
+                const parsed = JSON.parse(d);
+                if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+                const text = parsed.choices?.[0]?.message?.content || "";
+                if (!text) throw new Error("Empty response from model");
+                resolve(text);
+              } catch (e) {
+                console.warn("[AI] OpenRouter parse error:", e.message, "raw:", d.slice(0, 200));
+                reject(e);
+              }
+            });
+          });
+          r.on("error", reject);
+          r.write(body);
+          r.end();
+        });
+        return result; // success — return immediately
+      } catch (e) {
+        console.warn("[AI] OpenRouter model", model, "failed:", e.message, "— trying next");
+      }
+    }
+    throw new Error("All OpenRouter free models failed");
+  }
 
-  const body = JSON.stringify({
-    contents,
-    generationConfig: { maxOutputTokens: maxTokens }
-  });
-
-  return new Promise((resolve, reject) => {
-    const r = https.request({
-      hostname: "generativelanguage.googleapis.com",
-      path: "/v1beta/models/gemini-1.5-flash-latest:generateContent?key=" + key,
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Content-Length": Buffer.byteLength(body),
-      },
-    }, (resp) => {
-      let d = "";
-      resp.on("data", c => d += c);
-      resp.on("end", () => {
-        try {
-          console.log("[AI] Gemini status:", resp.statusCode, "body len:", d.length);
-          const parsed = JSON.parse(d);
-          if (parsed.error) {
-            console.error("[AI] Gemini error:", JSON.stringify(parsed.error));
-            throw new Error(parsed.error.message || JSON.stringify(parsed.error));
-          }
-          const text = parsed.candidates?.[0]?.content?.parts?.[0]?.text || "";
-          if (!text) console.warn("[AI] Gemini returned empty text. Full response:", d.slice(0, 500));
-          resolve(text);
-        } catch (e) {
-          console.error("[AI] Gemini parse error:", e.message, "raw:", d.slice(0, 300));
-          reject(e);
-        }
+  // Fallback: Gemini (if GEMINI_API_KEY set)
+  const gemKey = process.env.GEMINI_API_KEY || "";
+  if (gemKey) {
+    const contents = messages.map(m => ({
+      role: m.role === "assistant" ? "model" : "user",
+      parts: [{ text: m.content }]
+    }));
+    const body = JSON.stringify({ contents, generationConfig: { maxOutputTokens: maxTokens } });
+    return new Promise((resolve, reject) => {
+      const r = https.request({
+        hostname: "generativelanguage.googleapis.com",
+        path: "/v1beta/models/gemini-2.0-flash-lite:generateContent?key=" + gemKey,
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      }, (resp) => {
+        let d = "";
+        resp.on("data", c => d += c);
+        resp.on("end", () => {
+          try {
+            console.log("[AI] Gemini fallback status:", resp.statusCode);
+            const parsed = JSON.parse(d);
+            if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+            resolve(parsed.candidates?.[0]?.content?.parts?.[0]?.text || "");
+          } catch (e) { reject(e); }
+        });
       });
+      r.on("error", reject);
+      r.write(body);
+      r.end();
     });
-    r.on("error", (e) => {
-      console.error("[AI] Gemini network error:", e.message);
-      reject(e);
-    });
-    r.write(body);
-    r.end();
-  });
+  }
+
+  throw new Error("No AI API key set. Add OPENROUTER_API_KEY in Railway Variables (free at openrouter.ai)");
 }
 
 const PORT      = process.env.PORT || 3001;
@@ -734,15 +778,20 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { results, timestamp: new Date().toISOString() });
   }
 
-  // GET /api/ai-debug — test Gemini API key and connectivity
+  // GET /api/ai-debug — test AI connectivity
   if (req.method === "GET" && url === "/api/ai-debug") {
-    const key = process.env.GEMINI_API_KEY || "";
-    if (!key) return json(res, 200, { ok: false, error: "GEMINI_API_KEY is not set in Railway Variables", fix: "Go to Railway → your service → Variables → add GEMINI_API_KEY" });
+    const orKey = process.env.OPENROUTER_API_KEY || "";
+    const gemKey = process.env.GEMINI_API_KEY || "";
+    if (!orKey && !gemKey) return json(res, 200, {
+      ok: false,
+      error: "No AI key found. Add OPENROUTER_API_KEY in Railway Variables.",
+      fix: "Go to openrouter.ai → sign up free → Dashboard → API Keys → Create Key → paste as OPENROUTER_API_KEY in Railway Variables"
+    });
     try {
       const result = await groqChat([{ role: "user", content: "Reply with exactly: OK" }], { maxTokens: 10 });
-      return json(res, 200, { ok: true, response: result, keyPrefix: key.slice(0,8)+"..." });
+      return json(res, 200, { ok: true, response: result, using: orKey ? "OpenRouter" : "Gemini fallback" });
     } catch(e) {
-      return json(res, 200, { ok: false, error: e.message, keyPrefix: key.slice(0,8)+"...", fix: "Check your GEMINI_API_KEY is valid at aistudio.google.com" });
+      return json(res, 200, { ok: false, error: e.message, fix: "Check your OPENROUTER_API_KEY at openrouter.ai" });
     }
   }
   // Sources: 1) Twelve Data (primary) 2) CoinGecko (crypto fallback) 3) Frankfurter (forex/metals fallback)
