@@ -18,20 +18,16 @@ const AI_MODELS = [
   "google/gemma-2-9b-it:free",
 ];
 
-async function groqChat(messages, { maxTokens = 1024 } = {}) {
+async function groqChat(messages, { maxTokens = 1024, _collectErrors } = {}) {
   const https = require("https");
+  const modelErrors = [];
 
   // Try OpenRouter first (free, reliable)
   const orKey = process.env.OPENROUTER_API_KEY || "";
   if (orKey) {
     for (const model of AI_MODELS) {
       try {
-        const body = JSON.stringify({
-          model,
-          messages,
-          max_tokens: maxTokens,
-          temperature: 0.7,
-        });
+        const body = JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.7 });
         const result = await new Promise((resolve, reject) => {
           const r = https.request({
             hostname: "openrouter.ai",
@@ -51,26 +47,29 @@ async function groqChat(messages, { maxTokens = 1024 } = {}) {
               try {
                 console.log("[AI] OpenRouter status:", resp.statusCode, "model:", model);
                 const parsed = JSON.parse(d);
-                if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+                if (parsed.error) throw new Error("[" + resp.statusCode + "] " + (parsed.error.message || JSON.stringify(parsed.error)));
                 const text = parsed.choices?.[0]?.message?.content || "";
-                if (!text) throw new Error("Empty response from model");
+                if (!text) throw new Error("Empty response — raw: " + d.slice(0, 150));
                 resolve(text);
               } catch (e) {
-                console.warn("[AI] OpenRouter parse error:", e.message, "raw:", d.slice(0, 200));
+                console.warn("[AI] OpenRouter error:", e.message);
                 reject(e);
               }
             });
           });
-          r.on("error", reject);
+          r.on("error", e => reject(new Error("Network: " + e.message)));
           r.write(body);
           r.end();
         });
-        return result; // success — return immediately
+        return result;
       } catch (e) {
-        console.warn("[AI] OpenRouter model", model, "failed:", e.message, "— trying next");
+        const msg = model + ": " + e.message;
+        modelErrors.push(msg);
+        console.warn("[AI] Model failed:", msg);
       }
     }
-    throw new Error("All OpenRouter free models failed");
+    if (_collectErrors) throw Object.assign(new Error("All OpenRouter free models failed"), { modelErrors });
+    throw new Error("All OpenRouter free models failed. Errors: " + modelErrors.join(" | "));
   }
 
   // Fallback: Gemini (if GEMINI_API_KEY set)
@@ -105,7 +104,7 @@ async function groqChat(messages, { maxTokens = 1024 } = {}) {
     });
   }
 
-  throw new Error("No AI API key set. Add OPENROUTER_API_KEY in Railway Variables (free at openrouter.ai)");
+  throw new Error("No AI key set. Add OPENROUTER_API_KEY in Railway Variables (free at openrouter.ai)");
 }
 
 const PORT      = process.env.PORT || 3001;
@@ -788,10 +787,16 @@ const server = http.createServer(async (req, res) => {
       fix: "Go to openrouter.ai → sign up free → Dashboard → API Keys → Create Key → paste as OPENROUTER_API_KEY in Railway Variables"
     });
     try {
-      const result = await groqChat([{ role: "user", content: "Reply with exactly: OK" }], { maxTokens: 10 });
+      const result = await groqChat([{ role: "user", content: "Reply with exactly: OK" }], { maxTokens: 10, _collectErrors: true });
       return json(res, 200, { ok: true, response: result, using: orKey ? "OpenRouter" : "Gemini fallback" });
     } catch(e) {
-      return json(res, 200, { ok: false, error: e.message, fix: "Check your OPENROUTER_API_KEY at openrouter.ai" });
+      return json(res, 200, {
+        ok: false,
+        error: e.message,
+        modelErrors: e.modelErrors || null,
+        keys: { openrouter: orKey ? orKey.slice(0,12)+"..." : "NOT SET", gemini: gemKey ? gemKey.slice(0,8)+"..." : "NOT SET" },
+        fix: "See modelErrors above for exact failure per model"
+      });
     }
   }
   // Sources: 1) Twelve Data (primary) 2) CoinGecko (crypto fallback) 3) Frankfurter (forex/metals fallback)
