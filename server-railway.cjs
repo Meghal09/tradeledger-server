@@ -13,9 +13,11 @@ const path = require("path");
 // Free models: meta-llama/llama-3.3-8b-instruct:free  (fast, good quality)
 //              mistralai/mistral-7b-instruct:free      (fallback)
 const AI_MODELS = [
-  "meta-llama/llama-3.3-8b-instruct:free",
-  "mistralai/mistral-7b-instruct:free",
-  "google/gemma-2-9b-it:free",
+  "openrouter/auto",                              // auto-selects best available free model
+  "meta-llama/llama-4-scout:free",               // Meta Llama 4 Scout — fast, free
+  "meta-llama/llama-4-maverick:free",            // Meta Llama 4 Maverick — stronger
+  "deepseek/deepseek-chat-v3-0324:free",         // DeepSeek V3 — excellent quality
+  "mistralai/mistral-small-3.1-24b-instruct:free", // Mistral Small 3.1
 ];
 
 async function groqChat(messages, { maxTokens = 1024, _collectErrors } = {}) {
