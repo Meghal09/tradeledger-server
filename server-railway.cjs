@@ -20,117 +20,98 @@ const AI_MODELS = [
   "mistralai/mistral-small-3.1-24b-instruct:free", // Mistral Small 3.1
 ];
 
-async function groqChat(messages, { maxTokens = 1024, _collectErrors } = {}) {
+async function groqChat(messages, { maxTokens = 1024 } = {}) {
   const https = require("https");
-  const modelErrors = [];
 
-  // Try OpenRouter first (free, reliable)
-  const orKey = process.env.OPENROUTER_API_KEY || "";
-  if (orKey) {
-    for (const model of AI_MODELS) {
-      try {
-        const body = JSON.stringify({ model, messages, max_tokens: maxTokens, temperature: 0.7 });
-        const result = await new Promise((resolve, reject) => {
-          const r = https.request({
-            hostname: "openrouter.ai",
-            path: "/api/v1/chat/completions",
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "Authorization": "Bearer " + orKey,
-              "HTTP-Referer": "https://tradeledger.app",
-              "X-Title": "TradeLedger",
-              "Content-Length": Buffer.byteLength(body),
-            },
-          }, (resp) => {
-            let d = "";
-            resp.on("data", c => d += c);
-            resp.on("end", () => {
-              try {
-                console.log("[AI] OpenRouter status:", resp.statusCode, "model:", model);
-                const parsed = JSON.parse(d);
-                if (parsed.error) throw new Error("[" + resp.statusCode + "] " + (parsed.error.message || JSON.stringify(parsed.error)));
-                const text = parsed.choices?.[0]?.message?.content || "";
-                if (!text) throw new Error("Empty response — raw: " + d.slice(0, 150));
-                resolve(text);
-              } catch (e) {
-                console.warn("[AI] OpenRouter error:", e.message);
-                reject(e);
-              }
-            });
-          });
-          r.on("error", e => reject(new Error("Network: " + e.message)));
-          r.write(body);
-          r.end();
-        });
-        return result;
-      } catch (e) {
-        const msg = model + ": " + e.message;
-        modelErrors.push(msg);
-        console.warn("[AI] Model failed:", msg);
-      }
-    }
-    if (_collectErrors) throw Object.assign(new Error("All OpenRouter free models failed"), { modelErrors });
-    throw new Error("All OpenRouter free models failed. Errors: " + modelErrors.join(" | "));
-  }
-
-  // Fallback: Gemini (if GEMINI_API_KEY set)
-  const gemKey = process.env.GEMINI_API_KEY || "";
-  if (gemKey) {
-    const contents = messages.map(m => ({
-      role: m.role === "assistant" ? "model" : "user",
-      parts: [{ text: m.content }]
-    }));
-    const body = JSON.stringify({ contents, generationConfig: { maxOutputTokens: maxTokens } });
-    return new Promise((resolve, reject) => {
-      const r = https.request({
-        hostname: "generativelanguage.googleapis.com",
-        path: "/v1beta/models/gemini-2.0-flash-lite:generateContent?key=" + gemKey,
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-      }, (resp) => {
-        let d = "";
-        resp.on("data", c => d += c);
-        resp.on("end", () => {
-          try {
-            console.log("[AI] Gemini fallback status:", resp.statusCode);
-            const parsed = JSON.parse(d);
-            if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
-            resolve(parsed.candidates?.[0]?.content?.parts?.[0]?.text || "");
-          } catch (e) { reject(e); }
-        });
-      });
-      r.on("error", reject);
-      r.write(body);
-      r.end();
-    });
-  }
-
-  // Fallback: OpenAI (if OPENAI_API_KEY set)
+  // ── 1. OpenAI (OPENAI_API_KEY) — primary ────────────────────────────────
   const openaiKey = process.env.OPENAI_API_KEY || "";
   if (openaiKey) {
-    const body = JSON.stringify({ model: "gpt-4o-mini", max_tokens: maxTokens, messages, temperature: 0.7 });
-    return new Promise((resolve, reject) => {
-      const r = https.request({
-        hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST",
-        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey, "Content-Length": Buffer.byteLength(body) }
-      }, (resp) => {
-        let d = "";
-        resp.on("data", c => d += c);
-        resp.on("end", () => {
-          try {
-            console.log("[AI] OpenAI fallback status:", resp.statusCode);
-            const parsed = JSON.parse(d);
-            if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
-            resolve(parsed.choices?.[0]?.message?.content || "");
-          } catch(e) { reject(e); }
+    const body = JSON.stringify({ model: "gpt-4o-mini", messages, max_tokens: maxTokens, temperature: 0.7 });
+    try {
+      return await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey, "Content-Length": Buffer.byteLength(body) }
+        }, (resp) => {
+          let d = "";
+          resp.on("data", c => d += c);
+          resp.on("end", () => {
+            try {
+              console.log("[AI] OpenAI status:", resp.statusCode);
+              const parsed = JSON.parse(d);
+              if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+              const text = parsed.choices?.[0]?.message?.content || "";
+              if (!text) throw new Error("Empty response from OpenAI");
+              resolve(text);
+            } catch(e) { reject(e); }
+          });
         });
+        r.on("error", e => reject(new Error("Network: " + e.message)));
+        r.write(body); r.end();
       });
-      r.on("error", reject); r.write(body); r.end();
-    });
+    } catch(e) { console.warn("[AI] OpenAI failed:", e.message); }
   }
 
-  throw new Error("No AI key set. Add OPENROUTER_API_KEY in Railway Variables (free at openrouter.ai) or OPENAI_API_KEY");
+  // ── 2. Gemini (GEMINI_API_KEY) — fallback ───────────────────────────────
+  const gemKey = process.env.GEMINI_API_KEY || "";
+  if (gemKey) {
+    const contents = messages.map(m => ({ role: m.role === "assistant" ? "model" : "user", parts: [{ text: m.content }] }));
+    const body = JSON.stringify({ contents, generationConfig: { maxOutputTokens: maxTokens } });
+    try {
+      return await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: "generativelanguage.googleapis.com",
+          path: "/v1beta/models/gemini-2.0-flash-lite:generateContent?key=" + gemKey,
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) }
+        }, (resp) => {
+          let d = "";
+          resp.on("data", c => d += c);
+          resp.on("end", () => {
+            try {
+              console.log("[AI] Gemini status:", resp.statusCode);
+              const parsed = JSON.parse(d);
+              if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+              resolve(parsed.candidates?.[0]?.content?.parts?.[0]?.text || "");
+            } catch(e) { reject(e); }
+          });
+        });
+        r.on("error", reject); r.write(body); r.end();
+      });
+    } catch(e) { console.warn("[AI] Gemini failed:", e.message); }
+  }
+
+  // ── 3. OpenRouter (OPENROUTER_API_KEY) — last resort ────────────────────
+  const orKey = process.env.OPENROUTER_API_KEY || "";
+  if (orKey) {
+    const body = JSON.stringify({ model: "openrouter/auto", messages, max_tokens: maxTokens, temperature: 0.7 });
+    try {
+      return await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: "openrouter.ai", path: "/api/v1/chat/completions", method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": "Bearer " + orKey,
+            "HTTP-Referer": "https://tradeledger.app", "X-Title": "TradeLedger", "Content-Length": Buffer.byteLength(body) }
+        }, (resp) => {
+          let d = "";
+          resp.on("data", c => d += c);
+          resp.on("end", () => {
+            try {
+              console.log("[AI] OpenRouter status:", resp.statusCode);
+              const parsed = JSON.parse(d);
+              if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+              const text = parsed.choices?.[0]?.message?.content || "";
+              if (!text) throw new Error("Empty response from OpenRouter");
+              resolve(text);
+            } catch(e) { reject(e); }
+          });
+        });
+        r.on("error", e => reject(new Error("Network: " + e.message)));
+        r.write(body); r.end();
+      });
+    } catch(e) { console.warn("[AI] OpenRouter failed:", e.message); }
+  }
+
+  throw new Error("No AI key working. Set OPENAI_API_KEY in Railway Variables.");
 }
 
 const PORT      = process.env.PORT || 3001;
