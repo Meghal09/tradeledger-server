@@ -1014,9 +1014,6 @@ const server = http.createServer(async (req, res) => {
       }
       if (forceBust) { delete global._predCache[cacheKey]; console.log("[PRED] Cache busted for", cacheKey); }
 
-      const geminiKey = process.env.GEMINI_API_KEY || "";
-      if (!geminiKey) return json(res, 200, { predictions: [], error: "GEMINI_API_KEY not set in Railway Variables" });
-
       const https = require("https");
       const now = new Date();
       const dateStr = now.toLocaleDateString("en-US", { weekday:"long", month:"long", day:"numeric", year:"numeric" });
