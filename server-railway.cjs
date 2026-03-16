@@ -106,7 +106,31 @@ async function groqChat(messages, { maxTokens = 1024, _collectErrors } = {}) {
     });
   }
 
-  throw new Error("No AI key set. Add OPENROUTER_API_KEY in Railway Variables (free at openrouter.ai)");
+  // Fallback: OpenAI (if OPENAI_API_KEY set)
+  const openaiKey = process.env.OPENAI_API_KEY || "";
+  if (openaiKey) {
+    const body = JSON.stringify({ model: "gpt-4o-mini", max_tokens: maxTokens, messages, temperature: 0.7 });
+    return new Promise((resolve, reject) => {
+      const r = https.request({
+        hostname: "api.openai.com", path: "/v1/chat/completions", method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": "Bearer " + openaiKey, "Content-Length": Buffer.byteLength(body) }
+      }, (resp) => {
+        let d = "";
+        resp.on("data", c => d += c);
+        resp.on("end", () => {
+          try {
+            console.log("[AI] OpenAI fallback status:", resp.statusCode);
+            const parsed = JSON.parse(d);
+            if (parsed.error) throw new Error(parsed.error.message || JSON.stringify(parsed.error));
+            resolve(parsed.choices?.[0]?.message?.content || "");
+          } catch(e) { reject(e); }
+        });
+      });
+      r.on("error", reject); r.write(body); r.end();
+    });
+  }
+
+  throw new Error("No AI key set. Add OPENROUTER_API_KEY in Railway Variables (free at openrouter.ai) or OPENAI_API_KEY");
 }
 
 const PORT      = process.env.PORT || 3001;
