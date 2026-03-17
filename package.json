@@ -1,13 +1,19 @@
 {
-  "name": "tradeledger-server",
-  "version": "1.0.0",
-  "description": "TradeLedger Railway backend",
-  "main": "server-railway.cjs",
+  "name": "tradeledger",
+  "version": "0.0.0",
+  "type": "module",
   "scripts": {
-    "start": "node server-railway.cjs",
-    "build": "echo 'No build step required'"
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   },
-  "engines": {
-    "node": ">=18.0.0"
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.12.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "vite": "^5.4.2"
   }
 }
