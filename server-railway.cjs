@@ -1298,7 +1298,7 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
       if (!res.headersSent) json(res, 200, { query:"timeout", articles:[], aiSummary:null, generatedAt:new Date().toISOString() });
     }, 18000);
     try {
-      const q = (new URL("http://x" + url).searchParams.get("q") || "").trim().toLowerCase();
+      const q = (new URL(req.url, "http://localhost").searchParams.get("q") || "").trim().toLowerCase();
       if (!q) return json(res, 400, { error: "Missing query param q" });
 
       const https = require("https");
