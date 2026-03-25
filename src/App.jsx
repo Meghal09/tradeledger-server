@@ -1240,34 +1240,63 @@ function CalendarTab({trades,todayNews}){
             </div>
           )}
 
-          {/* Economic events */}
-          {todayNews.length>0&&(
-            <div className="card" style={{overflow:"hidden"}}>
-              <div style={{padding:"12px 14px",borderBottom:`1px solid ${T.border}`,fontSize:12,fontWeight:600}}>Economic Events</div>
-              <div>
-                {todayNews.map((e,i)=>{
-                  const impact=(e.impact||"").toLowerCase();
-                  const col=impact==="high"?T.red:impact==="medium"?T.amber:T.textDim;
-                  const badgeCol=impact==="high"?"red":impact==="medium"?"amber":"gray";
-                  return (
-                    <div key={i} className="trow" style={{padding:"10px 14px",display:"flex",alignItems:"center",gap:10}}>
-                      <div style={{width:6,height:6,borderRadius:"50%",background:col,flexShrink:0,boxShadow:impact==="high"?`0 0 6px ${col}`:"none"}}/>
-                      <div style={{flex:1,minWidth:0}}>
-                        <div style={{fontSize:12,fontWeight:500,color:T.text,lineHeight:1.4}}>{e.title||e.event||e.name||"Event"}</div>
-                        <div style={{fontSize:10,color:T.textDim,marginTop:2}}>{e.country||e.currency} {e.time?`· ${new Date(e.time).toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"})}`:""}</div>
-                        {(e.actual!=null||e.forecast!=null)&&<div style={{fontSize:10,color:T.textSub,marginTop:2,fontFamily:"'JetBrains Mono',monospace"}}>
-                          {e.actual!=null&&<span style={{color:T.green}}>Actual: {e.actual} </span>}
-                          {e.forecast!=null&&<span style={{color:T.textDim}}>Forecast: {e.forecast} </span>}
-                          {e.previous!=null&&<span style={{color:T.textDim}}>Prev: {e.previous}</span>}
-                        </div>}
-                      </div>
-                      <Badge color={badgeCol}>{impact||"low"}</Badge>
+          {/* Economic events — grouped by impact with full names and times */}
+          {todayNews.length>0&&(()=>{
+            const grouped={high:todayNews.filter(e=>(e.impact||"").toLowerCase()==="high"),medium:todayNews.filter(e=>(e.impact||"").toLowerCase()==="medium"),low:todayNews.filter(e=>!["high","medium"].includes((e.impact||"").toLowerCase()))};
+            const fmtTime=e=>{const d=e.date||e.time;if(!d)return"";try{const t=new Date(d);return isNaN(t)?"":" · "+t.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}catch{return"";}};
+            const EventRow=({e,imp})=>(
+              <div className="trow" style={{padding:"10px 14px",display:"grid",gridTemplateColumns:"1fr auto",gap:12,alignItems:"start"}}>
+                <div>
+                  <div style={{fontSize:12,fontWeight:imp==="high"?600:500,color:imp==="high"?T.text:T.textSub,lineHeight:1.45,marginBottom:3}}>{e.title||e.event||e.name||"Unnamed Event"}</div>
+                  <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
+                    {(e.country||e.currency)&&<span style={{fontSize:10,fontWeight:600,color:T.textDim}}>{e.country||e.currency}</span>}
+                    {fmtTime(e)&&<span style={{fontSize:10,color:T.textDim,fontFamily:"'JetBrains Mono',monospace"}}>{fmtTime(e)}</span>}
+                  </div>
+                  {(e.actual!=null||e.forecast!=null||e.previous!=null)&&(
+                    <div style={{display:"flex",gap:12,marginTop:5,padding:"4px 8px",background:T.bg,borderRadius:5,width:"fit-content"}}>
+                      {e.actual!=null&&<span style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace"}}><span style={{color:T.textDim}}>Act </span><span style={{color:T.green,fontWeight:700}}>{e.actual}</span></span>}
+                      {e.forecast!=null&&<span style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace"}}><span style={{color:T.textDim}}>Fcst </span><span style={{color:T.text}}>{e.forecast}</span></span>}
+                      {e.previous!=null&&<span style={{fontSize:10,fontFamily:"'JetBrains Mono',monospace"}}><span style={{color:T.textDim}}>Prev </span><span style={{color:T.textSub}}>{e.previous}</span></span>}
                     </div>
-                  );
-                })}
+                  )}
+                </div>
+                <Badge color={imp==="high"?"red":imp==="medium"?"amber":"gray"}>{imp==="high"?"HIGH":imp==="medium"?"MED":"LOW"}</Badge>
               </div>
-            </div>
-          )}
+            );
+            return (
+              <div className="card" style={{overflow:"hidden"}}>
+                <div style={{padding:"12px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div style={{fontSize:12,fontWeight:600}}>Economic Events Today</div>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    {grouped.high.length>0&&<span style={{fontSize:10,color:T.red,fontWeight:700,background:T.redBg,border:"1px solid "+T.redBorder,borderRadius:5,padding:"1px 6px"}}>{grouped.high.length} HIGH</span>}
+                    {grouped.medium.length>0&&<span style={{fontSize:10,color:T.amber,fontWeight:700,background:T.amberBg,border:"1px solid rgba(245,158,11,.25)",borderRadius:5,padding:"1px 6px"}}>{grouped.medium.length} MED</span>}
+                    <span style={{fontSize:11,color:T.textDim}}>{todayNews.length} total</span>
+                  </div>
+                </div>
+                {grouped.high.length>0&&<>
+                  <div style={{padding:"6px 14px",background:T.redBg,borderBottom:"1px solid "+T.redBorder,display:"flex",alignItems:"center",gap:6}}>
+                    <div style={{width:7,height:7,borderRadius:"50%",background:T.red,boxShadow:"0 0 6px "+T.red}}/>
+                    <span style={{fontSize:10,fontWeight:700,color:T.red,textTransform:"uppercase",letterSpacing:"0.06em"}}>High Impact — {grouped.high.length} event{grouped.high.length>1?"s":""}</span>
+                  </div>
+                  {grouped.high.map((e,i)=><EventRow key={i} e={e} imp="high"/>)}
+                </>}
+                {grouped.medium.length>0&&<>
+                  <div style={{padding:"6px 14px",background:T.amberBg,borderBottom:"1px solid rgba(245,158,11,.2)",display:"flex",alignItems:"center",gap:6}}>
+                    <div style={{width:7,height:7,borderRadius:"50%",background:T.amber}}/>
+                    <span style={{fontSize:10,fontWeight:700,color:T.amber,textTransform:"uppercase",letterSpacing:"0.06em"}}>Medium Impact — {grouped.medium.length} event{grouped.medium.length>1?"s":""}</span>
+                  </div>
+                  {grouped.medium.map((e,i)=><EventRow key={i} e={e} imp="medium"/>)}
+                </>}
+                {grouped.low.length>0&&<>
+                  <div style={{padding:"6px 14px",background:T.bg,borderBottom:"1px solid "+T.border,display:"flex",alignItems:"center",gap:6}}>
+                    <div style={{width:7,height:7,borderRadius:"50%",background:T.textDim}}/>
+                    <span style={{fontSize:10,fontWeight:700,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.06em"}}>Low Impact — {grouped.low.length} event{grouped.low.length>1?"s":""}</span>
+                  </div>
+                  {grouped.low.map((e,i)=><EventRow key={i} e={e} imp="low"/>)}
+                </>}
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>
@@ -2286,12 +2315,22 @@ export default function TradeLedger(){
           </div>
 
           {newsImpactOpen&&todayNews.length>0&&(
-            <div style={{background:"#fff",borderBottom:`1px solid ${T.border}`,padding:"8px 18px"}}>
-              <div style={{display:"flex",gap:12,flexWrap:"wrap"}}>
-                {todayNews.slice(0,6).map((e,i)=>{
-                  const impact=(e.impact||"").toLowerCase(),col=impact==="high"?T.red:impact==="medium"?T.amber:T.textDim;
-                  return <div key={i} style={{display:"flex",alignItems:"center",gap:6,fontSize:12,color:T.textSub}}><div style={{width:5,height:5,borderRadius:"50%",background:col,flexShrink:0}}/><span>{e.title||e.event}</span></div>;
+            <div style={{background:T.surface,borderBottom:"1px solid "+T.border,padding:"10px 18px"}}>
+              <div style={{display:"flex",gap:6,flexWrap:"wrap",alignItems:"center"}}>
+                {todayNews.slice(0,8).map((e,i)=>{
+                  const impact=(e.impact||"").toLowerCase();
+                  const col=impact==="high"?T.red:impact==="medium"?T.amber:T.textDim;
+                  const bg=impact==="high"?T.redBg:impact==="medium"?T.amberBg:T.bg;
+                  const border=impact==="high"?"1px solid "+T.redBorder:impact==="medium"?"1px solid rgba(245,158,11,.25)":"1px solid "+T.border;
+                  return (
+                    <div key={i} style={{display:"flex",alignItems:"center",gap:5,background:bg,border,borderRadius:6,padding:"3px 8px",maxWidth:280}}>
+                      <div style={{width:5,height:5,borderRadius:"50%",background:col,flexShrink:0,boxShadow:impact==="high"?"0 0 4px "+col:"none"}}/>
+                      <span style={{fontSize:11,color:col,fontWeight:impact==="high"?600:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis"}}>{e.title||e.event||e.name||"Event"}</span>
+                      {(e.country||e.currency)&&<span style={{fontSize:10,color:T.textDim,flexShrink:0}}>({e.country||e.currency})</span>}
+                    </div>
+                  );
                 })}
+                {todayNews.length>8&&<span style={{fontSize:11,color:T.textDim}}>+{todayNews.length-8} more</span>}
               </div>
             </div>
           )}
