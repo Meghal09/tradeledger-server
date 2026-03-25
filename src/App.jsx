@@ -8,7 +8,7 @@ const DEFAULT_WL = ["EURUSD","GBPUSD","USDJPY","XAUUSD","GBPJPY","USDCHF","AUDUS
 const PRICE_CACHE_KEY = "tl_price_cache";
 const PRICE_CACHE_TTL = 5 * 60 * 1000;
 
-const T = {
+const LIGHT = {
   bg:"#f0f2f8", surface:"#ffffff", raised:"#f7f8fc",
   border:"rgba(0,0,0,0.07)", borderHover:"rgba(0,0,0,0.14)",
   text:"#1a1d2e", textSub:"#6b7280", textDim:"#9ca3af",
@@ -19,6 +19,18 @@ const T = {
   purple:"#8b5cf6", purpleBg:"rgba(139,92,246,0.1)",
   cyan:"#06b6d4",
 };
+const DARK = {
+  bg:"#0e1117", surface:"#161b22", raised:"#1c2230",
+  border:"rgba(255,255,255,0.08)", borderHover:"rgba(255,255,255,0.16)",
+  text:"#e6edf3", textSub:"#8b949e", textDim:"#4a5568",
+  green:"#00c48c", greenBg:"rgba(0,196,140,0.12)", greenBorder:"rgba(0,196,140,0.3)",
+  red:"#ff5b5b", redBg:"rgba(255,91,91,0.12)", redBorder:"rgba(255,91,91,0.3)",
+  blue:"#4f80ff", blueBg:"rgba(79,128,255,0.12)",
+  amber:"#f59e0b", amberBg:"rgba(245,158,11,0.12)",
+  purple:"#8b5cf6", purpleBg:"rgba(139,92,246,0.12)",
+  cyan:"#06b6d4",
+};
+let T = {...LIGHT};
 
 function parseMT5Date(s){if(!s)return null;const d=new Date(String(s).replace(/\./g,"-").replace(" ","T"));return isNaN(d.getTime())?null:d;}
 function mt5Day(s){const d=parseMT5Date(s);return d?d.toISOString().slice(0,10):null;}
@@ -52,7 +64,21 @@ function computeStats(trades){
   let maxCW=0,maxCL=0,cw=0,cl=0;
   trades.forEach(t=>{if(t.profit>0){cw++;cl=0;if(cw>maxCW)maxCW=cw;}else{cl++;cw=0;if(cl>maxCL)maxCL=cl;}});
   const expectancy=+((wins.length/trades.length)*avgWin-(losses.length/trades.length)*avgLoss).toFixed(2);
-  return{total:trades.length,wins:wins.length,losses:losses.length,winRate:+((wins.length/trades.length)*100).toFixed(1),totalProfit,grossProfit:+gp.toFixed(2),grossLoss:+gl.toFixed(2),pf,avgWin,avgLoss,rr:avgLoss>0?+(avgWin/avgLoss).toFixed(2):"--",maxDD:+maxDD.toFixed(2),equity,dailyPnl,bySymbol:Object.values(symMap).sort((a,b)=>b.profit-a.profit),sessions:Object.entries(sessions).map(([k,v])=>({name:k,profit:+v.toFixed(2)})),byDayOfWeek:dayMap,maxCW,maxCL,expectancy};
+  // Deep stats
+  const sortedProfits=[...trades].map(t=>net(t)).sort((a,b)=>b-a);
+  const largestWin=sortedProfits[0]||0, largestLoss=sortedProfits[sortedProfits.length-1]||0;
+  const activeDays=new Set(trades.map(t=>mt5Day(t.openTime)).filter(Boolean)).size;
+  const tradesPerDay=activeDays>0?+(trades.length/activeDays).toFixed(1):0;
+  // Drawdown series
+  let ddBal=10000,ddPeak=10000;
+  const drawdownSeries=trades.map((t,i)=>{ddBal+=net(t);if(ddBal>ddPeak)ddPeak=ddBal;const dd=((ddPeak-ddBal)/ddPeak)*100;return{n:i+1,dd:+dd.toFixed(2)};});
+  // Monthly P&L
+  const monthMap={};
+  trades.forEach(t=>{const d=mt5Day(t.closeTime);if(!d)return;const m=d.slice(0,7);if(!monthMap[m])monthMap[m]={month:m,profit:0,trades:0,wins:0};monthMap[m].profit+=+net(t).toFixed(2);monthMap[m].trades++;if(t.profit>0)monthMap[m].wins++;});
+  const monthlyPnl=Object.values(monthMap).sort((a,b)=>a.month.localeCompare(b.month));
+  const bestMonth=monthlyPnl.length?[...monthlyPnl].sort((a,b)=>b.profit-a.profit)[0]:null;
+  const worstMonth=monthlyPnl.length?[...monthlyPnl].sort((a,b)=>a.profit-b.profit)[0]:null;
+  return{total:trades.length,wins:wins.length,losses:losses.length,winRate:+((wins.length/trades.length)*100).toFixed(1),totalProfit,grossProfit:+gp.toFixed(2),grossLoss:+gl.toFixed(2),pf,avgWin,avgLoss,rr:avgLoss>0?+(avgWin/avgLoss).toFixed(2):"--",maxDD:+maxDD.toFixed(2),equity,drawdownSeries,dailyPnl,monthlyPnl,bestMonth,worstMonth,bySymbol:Object.values(symMap).sort((a,b)=>b.profit-a.profit),sessions:Object.entries(sessions).map(([k,v])=>({name:k,profit:+v.toFixed(2)})),byDayOfWeek:dayMap,maxCW,maxCL,expectancy,largestWin:+largestWin.toFixed(2),largestLoss:+largestLoss.toFixed(2),tradesPerDay,activeDays};
 }
 
 const getSessions=()=>{const now=new Date(),u=now.getUTCHours()*60+now.getUTCMinutes();return[{name:"Sydney",color:T.cyan,open:21*60,close:6*60,overnight:true},{name:"Tokyo",color:T.amber,open:0,close:9*60,overnight:false},{name:"London",color:T.green,open:8*60,close:17*60,overnight:false},{name:"New York",color:T.purple,open:13*60,close:22*60,overnight:false}].map(s=>({...s,active:s.overnight?(u>=s.open||u<s.close):(u>=s.open&&u<s.close)}));};
@@ -61,12 +87,12 @@ const WL_SYMBOLS={Forex:["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","NZDUSD","
 const DEFAULT_CHECKLIST=["Checked economic calendar","Confirmed trend direction","Set stop loss","Risk < 1% of account","No revenge trading mindset","Entry aligns with setup rules"];
 
 // ── CSS ──────────────────────────────────────────────────────
-const GlobalStyles=()=>(
+const GlobalStyles=({dark})=>(
   <style>{`
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
     html,body,#root{height:100%;overflow:hidden;}
-    body{background:${T.bg};color:${T.text};font-family:'Inter',sans-serif;font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;}
+    body{background:${T.bg};color:${T.text};font-family:'Inter',sans-serif;font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased;transition:background .3s,color .3s;}
     ::-webkit-scrollbar{width:5px;height:5px;}
     ::-webkit-scrollbar-track{background:transparent;}
     ::-webkit-scrollbar-thumb{background:rgba(0,0,0,0.15);border-radius:3px;}
@@ -728,7 +754,19 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
 }
 
 // ── ANALYTICS ────────────────────────────────────────────────
+function exportCSV(trades){
+  const rows=[["#","Symbol","Type","Open Time","Close Time","Lots","Open Price","Close Price","Profit","Swap","Commission","Net P&L"]];
+  trades.forEach((t,i)=>{
+    const net=(t.profit||0)+(t.swap||0)+(t.commission||0);
+    rows.push([i+1,t.symbol,t.type,t.openTime,t.closeTime,t.lots||t.volume||"",t.openPrice||"",t.closePrice||"",t.profit||0,t.swap||0,t.commission||0,net.toFixed(2)]);
+  });
+  const csv=rows.map(r=>r.map(v=>JSON.stringify(v||"")).join(",")).join("\n");
+  const blob=new Blob([csv],{type:"text/csv"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="tradeledger-export-"+new Date().toISOString().slice(0,10)+".csv";a.click();
+}
+
 function AnalyticsTab({trades,stats,weeklyAI,genWeeklyAI}){
+  const [activeSection,setActiveSection]=useState("overview");
   if(!stats) return (
     <div className="page" style={{overflowY:"auto",height:"100%"}}>
       <h1 style={{fontSize:20,fontWeight:700,marginBottom:20}}>Analytics</h1>
@@ -739,25 +777,156 @@ function AnalyticsTab({trades,stats,weeklyAI,genWeeklyAI}){
   const hourMap={};
   trades.forEach(t=>{const h=mt5Hour(t.openTime);if(h!==null){if(!hourMap[h])hourMap[h]={hour:h,profit:0,trades:0};hourMap[h].profit+=t.profit;hourMap[h].trades++;}});
   const hourData=Array.from({length:24},(_,h)=>({hour:h,profit:+(hourMap[h]?.profit||0).toFixed(2),trades:hourMap[h]?.trades||0}));
+  const sections=[{k:"overview",l:"Overview"},{k:"deepstats",l:"Deep Stats"},{k:"drawdown",l:"Drawdown"},{k:"monthly",l:"Monthly"},{k:"coach",l:"AI Coach"}];
 
   return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:8}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
         <div><h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Analytics</h1><p style={{fontSize:12,color:T.textSub,marginTop:1}}>{stats.total} trades analysed</p></div>
+        <div style={{display:"flex",gap:8}}>
+          <button className="btn" style={{fontSize:11}} onClick={()=>exportCSV(trades)}>Export CSV</button>
+        </div>
       </div>
 
-      {/* KPI grid */}
+      {/* Section tabs */}
+      <div style={{display:"flex",gap:2,marginBottom:14,background:T.surface,borderRadius:10,padding:4,border:"1px solid "+T.border,width:"fit-content"}}>
+        {sections.map(s=><button key={s.k} onClick={()=>setActiveSection(s.k)} style={{padding:"5px 16px",borderRadius:7,border:"none",cursor:"pointer",fontSize:12,fontWeight:activeSection===s.k?700:400,background:activeSection===s.k?T.blue:"transparent",color:activeSection===s.k?"#fff":T.textSub,transition:"all .15s"}}>{s.l}</button>)}
+      </div>
+
+      {/* KPI grid — always visible */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10,marginBottom:14}}>
-        <KpiCard label="Net P&L" value={`$${stats.totalProfit}`} color={pnlColor}/>
-        <KpiCard label="Win Rate" value={`${stats.winRate}%`} color={stats.winRate>=50?T.green:T.red}/>
+        <KpiCard label="Net P&L" value={"$"+stats.totalProfit} color={pnlColor}/>
+        <KpiCard label="Win Rate" value={stats.winRate+"%"} color={stats.winRate>=50?T.green:T.red}/>
         <KpiCard label="Profit Factor" value={stats.pf} color={stats.pf>=1.5?T.green:stats.pf>=1?T.amber:T.red}/>
-        <KpiCard label="Expectancy" value={`$${stats.expectancy}`} color={stats.expectancy>=0?T.green:T.red}/>
-        <KpiCard label="Avg Win" value={`$${stats.avgWin}`} color={T.green}/>
-        <KpiCard label="Avg Loss" value={`$${stats.avgLoss}`} color={T.red}/>
-        <KpiCard label="Max Drawdown" value={`${stats.maxDD}%`} color={stats.maxDD>10?T.red:T.amber}/>
+        <KpiCard label="Expectancy" value={"$"+stats.expectancy} color={stats.expectancy>=0?T.green:T.red}/>
+        <KpiCard label="Avg Win" value={"$"+stats.avgWin} color={T.green}/>
+        <KpiCard label="Avg Loss" value={"$"+stats.avgLoss} color={T.red}/>
+        <KpiCard label="Max Drawdown" value={stats.maxDD+"%"} color={stats.maxDD>10?T.red:T.amber}/>
         <KpiCard label="Max Loss Streak" value={stats.maxCL} color={stats.maxCL>=4?T.red:T.amber}/>
       </div>
 
+      {/* DEEP STATS TABLE */}
+      {activeSection==="deepstats"&&(
+        <div style={{marginBottom:14}}>
+          <div className="card" style={{overflow:"hidden",marginBottom:12}}>
+            <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,fontSize:13,fontWeight:600}}>Complete Statistics</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:0}}>
+              {[
+                {label:"Total Trades",value:stats.total,note:"All closed trades"},
+                {label:"Winning Trades",value:stats.wins,note:`${stats.winRate}% win rate`,color:T.green},
+                {label:"Losing Trades",value:stats.losses,note:`${(100-stats.winRate).toFixed(1)}% loss rate`,color:T.red},
+                {label:"Gross Profit",value:"$"+stats.grossProfit,color:T.green},
+                {label:"Gross Loss",value:"$"+stats.grossLoss,color:T.red},
+                {label:"Net P&L",value:"$"+stats.totalProfit,color:stats.totalProfit>=0?T.green:T.red},
+                {label:"Profit Factor",value:stats.pf,color:stats.pf>=1.5?T.green:stats.pf>=1?T.amber:T.red},
+                {label:"Expected Payoff",value:"$"+stats.expectancy,color:stats.expectancy>=0?T.green:T.red},
+                {label:"R:R Ratio",value:"1:"+stats.rr},
+                {label:"Avg Win",value:"$"+stats.avgWin,color:T.green},
+                {label:"Avg Loss",value:"$"+stats.avgLoss,color:T.red},
+                {label:"Largest Win",value:"$"+stats.largestWin,color:T.green},
+                {label:"Largest Loss",value:"$"+stats.largestLoss,color:T.red},
+                {label:"Max Consec. Wins",value:stats.maxCW,color:T.green},
+                {label:"Max Consec. Losses",value:stats.maxCL,color:stats.maxCL>=4?T.red:T.amber},
+                {label:"Max Drawdown",value:stats.maxDD+"%",color:stats.maxDD>10?T.red:T.amber},
+                {label:"Active Trading Days",value:stats.activeDays},
+                {label:"Avg Trades/Day",value:stats.tradesPerDay,note:"On active days"},
+                {label:"Best Month",value:stats.bestMonth?"$"+stats.bestMonth.profit.toFixed(2)+"  ("+stats.bestMonth.month+")":"--",color:T.green},
+                {label:"Worst Month",value:stats.worstMonth?"$"+stats.worstMonth.profit.toFixed(2)+"  ("+stats.worstMonth.month+")":"--",color:T.red},
+                {label:"Avg Win/Loss Ratio",value:stats.avgLoss>0?+(stats.avgWin/stats.avgLoss).toFixed(2)+"x":"--"},
+                {label:"Recovery Factor",value:stats.maxDD>0?+(stats.totalProfit/stats.maxDD).toFixed(2):"--",note:"P&L / Max DD"},
+              ].map((row,i)=>(
+                <div key={row.label} style={{padding:"11px 16px",borderBottom:"1px solid "+T.border,borderRight:i%3<2?"1px solid "+T.border:"none",background:i%2===0?T.bg+"80":"transparent"}}>
+                  <div style={{fontSize:10,color:T.textDim,marginBottom:3,textTransform:"uppercase",letterSpacing:"0.04em"}}>{row.label}</div>
+                  <div style={{fontSize:14,fontWeight:700,color:row.color||T.text,fontFamily:"'JetBrains Mono',monospace"}}>{row.value}</div>
+                  {row.note&&<div style={{fontSize:10,color:T.textDim,marginTop:2}}>{row.note}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+          {/* Symbol breakdown table */}
+          <div className="card" style={{overflow:"hidden"}}>
+            <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,fontSize:13,fontWeight:600}}>Symbol Breakdown</div>
+            <table style={{width:"100%",borderCollapse:"collapse"}}>
+              <thead><tr style={{background:T.bg}}>{["Symbol","Trades","Wins","Win %","Net P&L","Avg P&L","Best","Worst"].map((h,i)=><th key={h} style={{padding:"8px 14px",fontSize:10,color:T.textDim,fontWeight:600,letterSpacing:"0.05em",textTransform:"uppercase",textAlign:i===0?"left":"right"}}>{h}</th>)}</tr></thead>
+              <tbody>{stats.bySymbol.map((s,i)=>{
+                const symT=trades.filter(t=>t.symbol===s.symbol);
+                const symPnls=symT.map(t=>(t.profit||0)+(t.swap||0)+(t.commission||0));
+                const best=symPnls.length?Math.max(...symPnls):0,worst=symPnls.length?Math.min(...symPnls):0;
+                const avg=symPnls.length?+(symPnls.reduce((a,b)=>a+b,0)/symPnls.length).toFixed(2):0;
+                const wr=s.trades?Math.round(s.wins/s.trades*100):0;
+                return <tr key={s.symbol} className="trow"><td style={{padding:"9px 14px",fontSize:12,fontWeight:600,fontFamily:"'JetBrains Mono',monospace"}}>{s.symbol}</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:12}}>{s.trades}</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:12,color:T.green}}>{s.wins}</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:12,color:wr>=50?T.green:T.red,fontWeight:600}}>{wr}%</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:12,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:s.profit>=0?T.green:T.red}}>{s.profit>=0?"+":""}{s.profit}</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:12,fontFamily:"'JetBrains Mono',monospace",color:avg>=0?T.green:T.red}}>{avg>=0?"+":""}{avg}</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:11,fontFamily:"'JetBrains Mono',monospace",color:T.green}}>+{best.toFixed(2)}</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:11,fontFamily:"'JetBrains Mono',monospace",color:T.red}}>{worst.toFixed(2)}</td></tr>;
+              })}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* DRAWDOWN CHART */}
+      {activeSection==="drawdown"&&(
+        <div style={{marginBottom:14}}>
+          <div className="card" style={{height:300,display:"flex",flexDirection:"column",overflow:"hidden",marginBottom:12}}>
+            <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div><div style={{fontSize:13,fontWeight:600}}>Drawdown Chart</div><div style={{fontSize:11,color:T.textSub,marginTop:1}}>How far below peak equity at each trade</div></div>
+              <div style={{background:T.redBg,border:"1px solid "+T.redBorder,borderRadius:8,padding:"4px 12px",fontSize:12,fontWeight:700,color:T.red}}>Max DD: {stats.maxDD}%</div>
+            </div>
+            <div style={{flex:1,padding:"8px 4px 4px",minHeight:0}}>
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={stats.drawdownSeries} margin={{left:0,right:4,top:4,bottom:0}}>
+                  <defs><linearGradient id="ddGrad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor={T.red} stopOpacity={.3}/><stop offset="100%" stopColor={T.red} stopOpacity={0.02}/></linearGradient></defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke={T.border} vertical={false}/>
+                  <YAxis tick={{fill:T.textDim,fontSize:10}} axisLine={false} tickLine={false} width={40} tickFormatter={v=>v.toFixed(1)+"%"} reversed/>
+                  <Tooltip content={({active,payload})=>active&&payload?.length?<div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:8,padding:"8px 12px",fontSize:11}}><div style={{color:T.textDim,marginBottom:3}}>Trade #{payload[0]?.payload?.n}</div><div style={{color:T.red,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>Drawdown: {payload[0]?.value?.toFixed(2)}%</div></div>:null}/>
+                  <Area type="monotone" dataKey="dd" name="Drawdown %" stroke={T.red} strokeWidth={2} fill="url(#ddGrad)" dot={false}/>
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+          {/* Drawdown stats */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:10}}>
+            {[
+              {l:"Max Drawdown",v:stats.maxDD+"%",c:stats.maxDD>20?T.red:stats.maxDD>10?T.amber:T.green},
+              {l:"Recovery Factor",v:stats.maxDD>0?+(stats.totalProfit/stats.maxDD).toFixed(2)+"x":"--",c:T.blue},
+              {l:"Largest Loss",v:"$"+stats.largestLoss,c:T.red},
+              {l:"Consecutive Losses",v:stats.maxCL,c:stats.maxCL>=4?T.red:T.amber},
+            ].map(x=><KpiCard key={x.l} label={x.l} value={x.v} color={x.c}/>)}
+          </div>
+        </div>
+      )}
+
+      {/* MONTHLY P&L */}
+      {activeSection==="monthly"&&(
+        <div style={{marginBottom:14}}>
+          <div className="card" style={{height:280,display:"flex",flexDirection:"column",overflow:"hidden",marginBottom:12}}>
+            <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,flexShrink:0,fontSize:13,fontWeight:600}}>Monthly P&L</div>
+            <div style={{flex:1,padding:"8px 4px 4px"}}>
+              {stats.monthlyPnl.length>0?(
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={stats.monthlyPnl} barSize={28} margin={{left:0,right:4,top:8,bottom:0}}>
+                    <CartesianGrid strokeDasharray="3 3" stroke={T.border} vertical={false}/>
+                    <XAxis dataKey="month" tick={{fill:T.textDim,fontSize:10}} axisLine={false} tickLine={false}/>
+                    <YAxis tick={{fill:T.textDim,fontSize:10}} axisLine={false} tickLine={false} width={50}/>
+                    <Tooltip content={({active,payload})=>active&&payload?.length?<div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:8,padding:"8px 12px",fontSize:11}}><div style={{color:T.textDim,marginBottom:3}}>{payload[0]?.payload?.month}</div><div style={{fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:payload[0]?.value>=0?T.green:T.red}}>P&L: ${payload[0]?.value?.toFixed(2)}</div><div style={{color:T.textDim}}>{payload[0]?.payload?.trades} trades · {payload[0]?.payload?.trades?Math.round(payload[0]?.payload?.wins/payload[0]?.payload?.trades*100):0}% WR</div></div>:null}/>
+                    <Bar dataKey="profit" name="P&L" radius={[4,4,0,0]}>{stats.monthlyPnl.map((d,i)=><Cell key={i} fill={d.profit>=0?T.green:T.red} fillOpacity={.85}/>)}</Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              ):<div style={{height:"100%",display:"flex",alignItems:"center",justifyContent:"center",color:T.textDim,fontSize:12}}>Not enough data</div>}
+            </div>
+          </div>
+          <div className="card" style={{overflow:"hidden"}}>
+            <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,fontSize:12,fontWeight:600}}>Month by Month</div>
+            <table style={{width:"100%",borderCollapse:"collapse"}}>
+              <thead><tr style={{background:T.bg}}>{["Month","Trades","Win Rate","Net P&L","Status"].map((h,i)=><th key={h} style={{padding:"8px 14px",fontSize:10,color:T.textDim,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.05em",textAlign:i===0?"left":"right"}}>{h}</th>)}</tr></thead>
+              <tbody>{[...stats.monthlyPnl].reverse().map(m=>{
+                const wr=m.trades?Math.round(m.wins/m.trades*100):0;
+                return <tr key={m.month} className="trow"><td style={{padding:"9px 14px",fontSize:12,fontWeight:600,fontFamily:"'JetBrains Mono',monospace"}}>{m.month}</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:12}}>{m.trades}</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:12,color:wr>=50?T.green:T.red,fontWeight:600}}>{wr}%</td><td style={{padding:"9px 14px",textAlign:"right",fontSize:13,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:m.profit>=0?T.green:T.red}}>{m.profit>=0?"+":""}{m.profit.toFixed(2)}</td><td style={{padding:"9px 14px",textAlign:"right"}}><Badge color={m.profit>=0?"green":"red"}>{m.profit>=0?"Profit":"Loss"}</Badge></td></tr>;
+              })}</tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* OVERVIEW SECTION */}
+      {(activeSection==="overview")&&<>
       {/* Charts row */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:12,marginBottom:14}}>
         <div className="card" style={{height:200,display:"flex",flexDirection:"column",overflow:"hidden"}}>
@@ -873,8 +1042,10 @@ $${cell.profit.toFixed(2)}`:"No trades"} style={{height:20,borderRadius:3,backgr
         );
       })()}
 
-      {/* AI Coach */}
-      <div className="card" style={{marginBottom:4}}>
+      </>}
+
+      {/* AI COACH section */}
+      {(activeSection==="coach"||activeSection==="overview")&&<div className="card" style={{marginBottom:4}}>
         <div style={{padding:"14px 16px",borderBottom:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
           <div>
             <div style={{fontSize:13,fontWeight:600}}>AI Trading Coach</div>
@@ -915,7 +1086,7 @@ $${cell.profit.toFixed(2)}`:"No trades"} style={{height:20,borderRadius:3,backgr
             </div>
           )}
         </div>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -1757,7 +1928,7 @@ function JournalTab({trades}){
 }
 
 // ── SETUP ─────────────────────────────────────────────────────
-function SetupTab({serverOk,trades,riskLimit,setRiskLimit}){
+function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,accounts,setAccounts,activeAccount,setActiveAccount}){
   const [rlInput,setRlInput]=useState(riskLimit||"");
   return (
     <div className="page" style={{overflowY:"auto",height:"100%"}}>
@@ -1792,6 +1963,43 @@ function SetupTab({serverOk,trades,riskLimit,setRiskLimit}){
           <div style={{fontFamily:"'JetBrains Mono',monospace",fontSize:14,color:T.green,background:T.greenBg,border:`1px solid ${T.greenBorder}`,borderRadius:8,padding:"10px 14px",marginBottom:10}}>TL-S7PDZ3UV</div>
           <div style={{fontSize:11,color:T.textDim}}>Set as <code style={{fontFamily:"'JetBrains Mono',monospace",color:T.textSub}}>TRADELEDGER_TOKEN</code> in Railway</div>
         </div>
+        {/* GOALS */}
+        <div className="card" style={{padding:20,gridColumn:"1/-1"}}>
+          <div style={{fontSize:13,fontWeight:600,marginBottom:4}}>Goals & Targets</div>
+          <div style={{fontSize:12,color:T.textSub,marginBottom:14}}>Set monthly targets — shown as progress bars on your dashboard.</div>
+          <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:12}}>
+            {[{k:"monthlyProfit",l:"Monthly Profit Target ($)",ph:"e.g. 500"},{k:"winRate",l:"Win Rate Goal (%)",ph:"e.g. 60"},{k:"maxDD",l:"Max Drawdown Limit (%)",ph:"e.g. 10"}].map(g=>(
+              <div key={g.k}>
+                <div style={{fontSize:11,color:T.textDim,marginBottom:4,fontWeight:500}}>{g.l}</div>
+                <div style={{display:"flex",gap:8}}>
+                  <input className="input" type="number" placeholder={g.ph} value={goals[g.k]||""} onChange={e=>{const v=parseFloat(e.target.value)||0;const ng={...goals,[g.k]:v};setGoals(ng);try{localStorage.setItem("tl_goals",JSON.stringify(ng));}catch{}}}/>
+                  {goals[g.k]>0&&<button className="btn" style={{color:T.red,borderColor:T.redBorder,padding:"4px 8px",fontSize:12}} onClick={()=>{const ng={...goals,[g.k]:0};setGoals(ng);try{localStorage.setItem("tl_goals",JSON.stringify(ng));}catch{}}}>x</button>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* MULTI-ACCOUNT */}
+        <div className="card" style={{padding:20,gridColumn:"1/-1"}}>
+          <div style={{fontSize:13,fontWeight:600,marginBottom:4}}>Multiple Accounts</div>
+          <div style={{fontSize:12,color:T.textSub,marginBottom:14}}>Switch between Live, Demo, and Prop firm accounts. Each stores its own trades.</div>
+          <div style={{display:"flex",flexDirection:"column",gap:8,marginBottom:12}}>
+            {accounts.map(acc=>(
+              <div key={acc.id} style={{display:"flex",gap:10,alignItems:"center",padding:"10px 14px",borderRadius:10,border:"2px solid "+(activeAccount===acc.id?T.blue:T.border),background:activeAccount===acc.id?T.blueBg:T.surface,transition:"all .15s"}}>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:13,fontWeight:600,color:activeAccount===acc.id?T.blue:T.text}}>{acc.label}</div>
+                  <div style={{fontSize:11,color:T.textDim,fontFamily:"'JetBrains Mono',monospace",marginTop:2}}>{acc.token}</div>
+                </div>
+                {activeAccount!==acc.id&&<button className="btn btn-primary" style={{fontSize:11}} onClick={()=>{setActiveAccount(acc.id);try{localStorage.setItem("tl_active_account",acc.id);}catch{}}}>Switch</button>}
+                {activeAccount===acc.id&&<Badge color="blue">Active</Badge>}
+                {accounts.length>1&&<button className="btn" style={{fontSize:11,color:T.red,borderColor:T.redBorder}} onClick={()=>{const na=accounts.filter(a=>a.id!==acc.id);setAccounts(na);try{localStorage.setItem("tl_accounts",JSON.stringify(na));}catch{};if(activeAccount===acc.id){setActiveAccount(na[0].id);try{localStorage.setItem("tl_active_account",na[0].id);}catch{}};}}>Remove</button>}
+              </div>
+            ))}
+          </div>
+          <button className="btn" onClick={()=>{const label=prompt("Account name (e.g. Demo, Prop Firm, Live):","");if(!label)return;const token=prompt("Auth token for this account:","TL-");if(!token)return;const na=[...accounts,{id:Date.now().toString(),label,token,trades:[]}];setAccounts(na);try{localStorage.setItem("tl_accounts",JSON.stringify(na));}catch{}}}>+ Add Account</button>
+        </div>
+
         <div className="card" style={{padding:20,gridColumn:"1/-1"}}>
           <div style={{fontSize:13,fontWeight:600,marginBottom:6}}>Daily Risk Limit</div>
           <p style={{fontSize:12,color:T.textSub,marginBottom:14}}>TradeLedger locks the screen if today's loss exceeds this amount.</p>
@@ -1843,6 +2051,16 @@ export default function TradeLedger(){
   const [serverOk,setServerOk]=useState(false);
   const [lastSync,setLastSync]=useState(null);
   const [sideOpen,setSideOpen]=useState(true);
+  const [dark,setDark]=useState(()=>{try{return localStorage.getItem("tl_dark")==="1";}catch{return false;}});
+  // Multi-account support
+  const [accounts,setAccounts]=useState(()=>{try{return JSON.parse(localStorage.getItem("tl_accounts")||"null")||[{id:"default",label:"Main Account",token:"TL-S7PDZ3UV",trades:[]}];}catch{return [{id:"default",label:"Main Account",token:"TL-S7PDZ3UV",trades:[]}];}});
+  const [activeAccount,setActiveAccount]=useState(()=>{try{return localStorage.getItem("tl_active_account")||"default";}catch{return "default";}});
+  // Goals
+  const [goals,setGoals]=useState(()=>{try{return JSON.parse(localStorage.getItem("tl_goals")||"null")||{monthlyProfit:0,dailyTrades:0,winRate:0,maxDD:0};}catch{return {monthlyProfit:0,dailyTrades:0,winRate:0,maxDD:0};}});
+
+  // Apply dark mode
+  useMemo(()=>{ T=dark?{...DARK}:{...LIGHT}; },[dark]);
+  const toggleDark=()=>{setDark(d=>{const n=!d;try{localStorage.setItem("tl_dark",n?"1":"0");}catch{}return n;});};
 
   const [watchlist,setWatchlist]=useState(()=>{try{return JSON.parse(localStorage.getItem("tl_wl")||JSON.stringify(DEFAULT_WL));}catch{return DEFAULT_WL;}});
   const [prices,setPrices]=useState({});
@@ -1973,7 +2191,7 @@ export default function TradeLedger(){
 
   return (
     <>
-      <GlobalStyles/>
+      <GlobalStyles dark={dark}/>
 
       {/* Article reader */}
       {readModal&&(
@@ -2031,6 +2249,15 @@ export default function TradeLedger(){
               </button>;
             })}
           </nav>
+          {/* Account switcher in sidebar */}
+          {accounts.length>1&&(
+            <div style={{padding:"6px 8px",borderTop:"1px solid "+T.border,flexShrink:0}}>
+              <div style={{fontSize:9,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:4,paddingLeft:4}}>Account</div>
+              <select value={activeAccount} onChange={e=>{setActiveAccount(e.target.value);try{localStorage.setItem("tl_active_account",e.target.value);}catch{}}} style={{width:"100%",background:T.bg,border:"1px solid "+T.border,borderRadius:6,padding:"4px 6px",fontSize:11,color:T.textSub,cursor:"pointer"}}>
+                {accounts.map(a=><option key={a.id} value={a.id}>{a.label}</option>)}
+              </select>
+            </div>
+          )}
           <div style={{padding:"8px 6px",borderTop:`1px solid ${T.border}`,flexShrink:0}}>
             <div style={{display:"flex",alignItems:"center",gap:6,marginBottom:6,justifyContent:"flex-start",padding:"4px 6px"}}>
               <div style={{width:6,height:6,borderRadius:"50%",background:serverOk?T.green:T.red,flexShrink:0,animation:serverOk?"none":"pulse 1.5s infinite"}}/>
@@ -2054,6 +2281,7 @@ export default function TradeLedger(){
               {todayNews.length>0&&<button className="btn" style={{fontSize:11,padding:"4px 10px"}} onClick={()=>setNewsImpactOpen(o=>!o)}>{todayNews.filter(e=>(e.impact||"").toLowerCase()==="high").length>0&&<span style={{color:T.red}}>● </span>}Events</button>}
               <button className="btn" style={{fontSize:11,padding:"4px 10px"}} onClick={()=>setChecklistOpen(true)}>Checklist</button>
               {trades.length>0&&<span style={{fontSize:11,color:T.textDim,fontFamily:"'JetBrains Mono',monospace",background:T.bg,padding:"2px 7px",borderRadius:5}}>{trades.length}t</span>}
+              <button onClick={toggleDark} title={dark?"Light mode":"Dark mode"} style={{background:dark?"rgba(255,255,255,0.1)":T.bg,border:"1px solid "+T.border,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:13,color:T.textSub,display:"flex",alignItems:"center",gap:5,transition:"all .2s"}}>{dark?"Light":"Dark"}</button>
             </div>
           </div>
 
@@ -2077,7 +2305,7 @@ export default function TradeLedger(){
             {tab==="calendar"&&<CalendarTab trades={trades} todayNews={todayNews}/>}
             {tab==="news"&&<NewsTab savedNews={savedNews} setSavedNews={setSavedNews} fetchNews={fetchNews} newsLd={newsLd} openArticle={openArticle} searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchResults={searchResults} searchLd={searchLd} searchErr={searchErr} fetchMarketSearch={fetchMarketSearch}/>}
             {tab==="journal"&&<JournalTab trades={trades}/>}
-            {tab==="setup"&&<SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit}/>}
+            {tab==="setup"&&<SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit} goals={goals} setGoals={setGoals} accounts={accounts} setAccounts={setAccounts} activeAccount={activeAccount} setActiveAccount={setActiveAccount}/>}
           </div>
         </div>
       </div>
