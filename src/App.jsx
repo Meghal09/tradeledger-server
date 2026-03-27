@@ -4,7 +4,7 @@ import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, R
 const SERVER = "https://tradeledger-server-production.up.railway.app";
 const WS_URL  = "wss://tradeledger-server-production.up.railway.app/ws";
 const RAILWAY_SERVER = SERVER;
-const DEFAULT_WL = ["EURUSD","GBPUSD","USDJPY","XAUUSD","GBPJPY","USDCHF","AUDUSD","BTCUSD"];
+const DEFAULT_WL = ["EURUSD","GBPUSD","USDJPY","XAUUSD","GBPJPY","USDCHF","AUDUSD","BTCUSD","ETHUSD","XRPUSD","SOLUSD","BNBUSD"];
 const PRICE_CACHE_KEY = "tl_price_cache";
 const PRICE_CACHE_TTL = 5 * 60 * 1000;
 
@@ -1956,6 +1956,484 @@ function JournalTab({trades}){
   );
 }
 
+
+// ── CRYPTO ────────────────────────────────────────────────────
+
+const CRYPTO_COINS = [
+  {id:"BTC",  name:"Bitcoin",   color:"#f7931a", bg:"rgba(247,147,26,0.1)"},
+  {id:"ETH",  name:"Ethereum",  color:"#627eea", bg:"rgba(98,126,234,0.1)"},
+  {id:"XRP",  name:"XRP",       color:"#00aae4", bg:"rgba(0,170,228,0.1)"},
+  {id:"SOL",  name:"Solana",    color:"#9945ff", bg:"rgba(153,69,255,0.1)"},
+  {id:"BNB",  name:"BNB",       color:"#f3ba2f", bg:"rgba(243,186,47,0.1)"},
+  {id:"ADA",  name:"Cardano",   color:"#0033ad", bg:"rgba(0,51,173,0.1)"},
+  {id:"DOGE", name:"Dogecoin",  color:"#c2a633", bg:"rgba(194,166,51,0.1)"},
+  {id:"LTC",  name:"Litecoin",  color:"#b0b0b0", bg:"rgba(176,176,176,0.1)"},
+];
+
+const EXCHANGES = [
+  {id:"bybit",    name:"Bybit",    color:"#f7a600", logo:"B", url:"https://api.bybit.com"},
+  {id:"binance",  name:"Binance",  color:"#f0b90b", logo:"N", url:"https://api.binance.com"},
+  {id:"coinbase", name:"Coinbase", color:"#0052ff", logo:"C", url:"https://api.coinbase.com"},
+  {id:"okx",      name:"OKX",      color:"#000000", logo:"O", url:"https://www.okx.com"},
+  {id:"kucoin",   name:"KuCoin",   color:"#00a550", logo:"K", url:"https://api.kucoin.com"},
+];
+
+// Fetch price from Bybit public API (no key needed for prices)
+async function fetchBybitPrice(symbol){
+  try{
+    const r=await fetch("https://api.bybit.com/v5/market/tickers?category=spot&symbol="+symbol+"USDT",{signal:AbortSignal.timeout(8000)});
+    const d=await r.json();
+    const t=d?.result?.list?.[0];
+    if(!t)return null;
+    return{price:parseFloat(t.lastPrice),chg:parseFloat(t.price24hPcnt)*100,high:parseFloat(t.highPrice24h),low:parseFloat(t.lowPrice24h),vol:parseFloat(t.volume24h),turnover:parseFloat(t.turnover24h)};
+  }catch{return null;}
+}
+
+// Fetch price from Binance public API (no key needed)
+async function fetchBinancePrice(symbol){
+  try{
+    const r=await fetch("https://api.binance.com/api/v3/ticker/24hr?symbol="+symbol+"USDT",{signal:AbortSignal.timeout(8000)});
+    const d=await r.json();
+    if(!d||d.code)return null;
+    return{price:parseFloat(d.lastPrice),chg:parseFloat(d.priceChangePercent),high:parseFloat(d.highPrice),low:parseFloat(d.lowPrice),vol:parseFloat(d.volume),turnover:parseFloat(d.quoteVolume)};
+  }catch{return null;}
+}
+
+// Fetch from Coinbase public API
+async function fetchCoinbasePrice(symbol){
+  try{
+    const r=await fetch("https://api.coinbase.com/v2/prices/"+symbol+"-USD/spot",{signal:AbortSignal.timeout(8000)});
+    const d=await r.json();
+    if(!d?.data?.amount)return null;
+    return{price:parseFloat(d.data.amount),chg:0,high:0,low:0,vol:0,turnover:0};
+  }catch{return null;}
+}
+
+// Fetch portfolio from exchange using API key — server-side proxy
+async function fetchExchangePortfolio(exchange, apiKey, apiSecret){
+  try{
+    const r=await fetch(SERVER+"/api/crypto-portfolio?exchange="+exchange+"&key="+encodeURIComponent(apiKey)+"&secret="+encodeURIComponent(apiSecret),{signal:AbortSignal.timeout(15000)});
+    if(!r.ok)throw new Error("Server error "+r.status);
+    return await r.json();
+  }catch(e){return{error:e.message};}
+}
+
+// Fear & Greed derived from BTC movement
+function fearGreedFromPrice(btcData){
+  if(!btcData)return null;
+  const chg=btcData.chg||0, vol=btcData.high&&btcData.low&&btcData.price?(btcData.high-btcData.low)/btcData.price*100:0;
+  let score=50;
+  if(chg>5)score+=25;else if(chg>2)score+=14;else if(chg>0.5)score+=7;
+  else if(chg<-5)score-=25;else if(chg<-2)score-=14;else if(chg<-0.5)score-=7;
+  if(vol>8)score-=8;else if(vol<2)score+=4;
+  return Math.max(0,Math.min(100,Math.round(score)));
+}
+
+function CryptoTab({prices, pFlash, onAddSymbol}){
+  const [selected, setSelected]=useState("BTC");
+  const [cryptoPrices, setCryptoPrices]=useState({});
+  const [loading, setLoading]=useState(false);
+  const [activeExchange, setActiveExchange]=useState(()=>{try{return localStorage.getItem("tl_cx_active")||"bybit";}catch{return"bybit";}});
+  const [apiKeys, setApiKeys]=useState(()=>{try{return JSON.parse(localStorage.getItem("tl_cx_keys")||"{}");}catch{return{};}});
+  const [showConnect, setShowConnect]=useState(false);
+  const [connectExchange, setConnectExchange]=useState("bybit");
+  const [connectKey, setConnectKey]=useState("");
+  const [connectSecret, setConnectSecret]=useState("");
+  const [portfolio, setPortfolio]=useState(null);
+  const [portfolioLd, setPortfolioLd]=useState(false);
+  const [portfolioErr, setPortfolioErr]=useState(null);
+
+  const selCoin=CRYPTO_COINS.find(c=>c.id===selected)||CRYPTO_COINS[0];
+  const selData=cryptoPrices[selected];
+
+  // Load crypto prices from exchange public API
+  const loadPrices=useCallback(async()=>{
+    setLoading(true);
+    const results={};
+    const fetcher=activeExchange==="binance"?fetchBinancePrice:activeExchange==="coinbase"?fetchCoinbasePrice:fetchBybitPrice;
+    await Promise.all(CRYPTO_COINS.map(async coin=>{
+      const d=await fetcher(coin.id);
+      if(d)results[coin.id]=d;
+    }));
+    setCryptoPrices(results);
+    setLoading(false);
+  },[activeExchange]);
+
+  useEffect(()=>{loadPrices();},[loadPrices]);
+  useEffect(()=>{const t=setInterval(loadPrices,30000);return()=>clearInterval(t);},[loadPrices]);
+
+  // Load portfolio if API key saved
+  const loadPortfolio=useCallback(async()=>{
+    const keys=apiKeys[activeExchange];
+    if(!keys?.key)return;
+    setPortfolioLd(true);setPortfolioErr(null);
+    const res=await fetchExchangePortfolio(activeExchange,keys.key,keys.secret||"");
+    if(res.error)setPortfolioErr(res.error);
+    else setPortfolio(res);
+    setPortfolioLd(false);
+  },[activeExchange,apiKeys]);
+
+  useEffect(()=>{loadPortfolio();},[loadPortfolio]);
+
+  const saveApiKey=()=>{
+    if(!connectKey.trim())return;
+    const nk={...apiKeys,[connectExchange]:{key:connectKey.trim(),secret:connectSecret.trim()}};
+    setApiKeys(nk);try{localStorage.setItem("tl_cx_keys",JSON.stringify(nk));}catch{}
+    setActiveExchange(connectExchange);try{localStorage.setItem("tl_cx_active",connectExchange);}catch{}
+    setShowConnect(false);setConnectKey("");setConnectSecret("");
+    setTimeout(loadPortfolio,500);
+  };
+
+  const removeKey=()=>{
+    const nk={...apiKeys};delete nk[activeExchange];
+    setApiKeys(nk);try{localStorage.setItem("tl_cx_keys",JSON.stringify(nk));}catch{}
+    setPortfolio(null);
+  };
+
+  const connectedExchanges=Object.keys(apiKeys).filter(k=>apiKeys[k]?.key);
+  const fgScore=fearGreedFromPrice(cryptoPrices["BTC"]);
+  const fgLabel=fgScore===null?"--":fgScore>=80?"Extreme Greed":fgScore>=60?"Greed":fgScore>=45?"Neutral":fgScore>=25?"Fear":"Extreme Fear";
+  const fgColor=fgScore===null?T.textDim:fgScore>=60?T.green:fgScore>=45?T.amber:T.red;
+
+  // Signal from live data
+  const sig=selData?(()=>{
+    const {price,chg,high,low}=selData;
+    const range=(high||price*1.02)-(low||price*0.98);
+    const rangePct=range>0?(price-(low||price*0.98))/range:0.5;
+    const abs=Math.abs(chg);
+    let signal,conf;
+    if(chg>3&&rangePct>0.6){signal="BUY";conf=Math.min(82,56+Math.round(abs*3));}
+    else if(chg<-3&&rangePct<0.4){signal="SELL";conf=Math.min(82,56+Math.round(abs*3));}
+    else if(chg>1){signal="BUY";conf=57;}
+    else if(chg<-1){signal="SELL";conf=57;}
+    else{signal="HOLD";conf=48;}
+    const dec=price>10000?0:price>100?2:price>1?4:6;
+    const fmt=v=>"$"+v.toLocaleString(undefined,{minimumFractionDigits:dec,maximumFractionDigits:dec});
+    const sup=+(price*(1-range/price*0.4)).toFixed(dec);
+    const res=+(price*(1+range/price*0.4)).toFixed(dec);
+    const tgt=signal==="BUY"?+(price*(1+range/price*0.5)).toFixed(dec):signal==="SELL"?+(price*(1-range/price*0.5)).toFixed(dec):price;
+    return {signal,conf,sup,res,tgt,fmt,dec,rangePct};
+  })():null;
+
+  return (
+    <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:20}}>
+
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+        <div>
+          <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Crypto</h1>
+          <p style={{fontSize:12,color:T.textSub,marginTop:1}}>Live prices · portfolio · signals — no MT5 needed</p>
+        </div>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {/* Fear & Greed */}
+          <div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:10,padding:"8px 14px",display:"flex",alignItems:"center",gap:10}}>
+            <div>
+              <div style={{fontSize:9,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:1}}>Market Sentiment</div>
+              <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+                <span style={{fontSize:20,fontWeight:800,color:fgColor,fontFamily:"'JetBrains Mono',monospace"}}>{fgScore===null?"--":fgScore}</span>
+                <span style={{fontSize:11,fontWeight:600,color:fgColor}}>{fgLabel}</span>
+              </div>
+            </div>
+          </div>
+          {/* Exchange switcher */}
+          <div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:10,padding:"4px"}}>
+            <div style={{display:"flex",gap:2}}>
+              {EXCHANGES.slice(0,3).map(ex=>{
+                const connected=!!apiKeys[ex.id]?.key;
+                const active=activeExchange===ex.id;
+                return <button key={ex.id} onClick={()=>{setActiveExchange(ex.id);try{localStorage.setItem("tl_cx_active",ex.id);}catch{}}}
+                  style={{padding:"5px 10px",borderRadius:7,border:"none",cursor:"pointer",fontSize:11,fontWeight:active?700:400,background:active?ex.color:"transparent",color:active?"#fff":T.textSub,transition:"all .15s",display:"flex",alignItems:"center",gap:4}}>
+                  {connected&&<div style={{width:5,height:5,borderRadius:"50%",background:active?"rgba(255,255,255,.7)":T.green}}/>}
+                  {ex.name}
+                </button>;
+              })}
+            </div>
+          </div>
+          <button className="btn btn-primary" onClick={()=>setShowConnect(true)} style={{fontSize:11}}>Connect Exchange</button>
+        </div>
+      </div>
+
+      {/* Connect Exchange Modal */}
+      {showConnect&&(
+        <div style={{position:"fixed",inset:0,zIndex:1000,background:"rgba(0,0,0,0.4)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center"}}>
+          <div style={{background:T.surface,border:"1px solid "+T.border,borderRadius:16,padding:28,width:"min(480px,95vw)",boxShadow:"0 24px 64px rgba(0,0,0,0.2)"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+              <div style={{fontSize:15,fontWeight:700}}>Connect Exchange</div>
+              <button onClick={()=>setShowConnect(false)} style={{background:"none",border:"none",fontSize:20,cursor:"pointer",color:T.textDim,lineHeight:1}}>x</button>
+            </div>
+
+            {/* Exchange picker */}
+            <div style={{fontSize:11,color:T.textDim,fontWeight:600,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.04em"}}>Select Exchange</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:8,marginBottom:18}}>
+              {EXCHANGES.map(ex=>{
+                const connected=!!apiKeys[ex.id]?.key;
+                return (
+                  <div key={ex.id} onClick={()=>setConnectExchange(ex.id)}
+                    style={{border:"2px solid "+(connectExchange===ex.id?ex.color:T.border),borderRadius:10,padding:"10px 8px",cursor:"pointer",textAlign:"center",background:connectExchange===ex.id?ex.color+"12":"transparent",transition:"all .15s"}}>
+                    <div style={{width:32,height:32,borderRadius:8,background:ex.color+"20",border:"1px solid "+ex.color+"40",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,fontWeight:800,color:ex.color,margin:"0 auto 6px"}}>{ex.logo}</div>
+                    <div style={{fontSize:11,fontWeight:600,color:T.text}}>{ex.name}</div>
+                    {connected&&<div style={{fontSize:9,color:T.green,marginTop:2,fontWeight:600}}>Connected</div>}
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Key fields */}
+            <div style={{background:T.bg,borderRadius:10,padding:"14px 16px",marginBottom:18}}>
+              <div style={{fontSize:12,color:T.textSub,marginBottom:12,lineHeight:1.6}}>
+                Use <strong>read-only</strong> API keys — TradeLedger only reads your balances and trade history. It cannot place orders.
+              </div>
+              <div style={{marginBottom:10}}>
+                <div style={{fontSize:11,color:T.textDim,marginBottom:4,fontWeight:600}}>API Key</div>
+                <input className="input" placeholder="Paste your API key..." value={connectKey} onChange={e=>setConnectKey(e.target.value)} style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12}}/>
+              </div>
+              <div>
+                <div style={{fontSize:11,color:T.textDim,marginBottom:4,fontWeight:600}}>API Secret (optional for price data)</div>
+                <input className="input" type="password" placeholder="Paste your API secret..." value={connectSecret} onChange={e=>setConnectSecret(e.target.value)} style={{fontFamily:"'JetBrains Mono',monospace",fontSize:12}}/>
+              </div>
+            </div>
+
+            {/* How to get keys */}
+            <div style={{marginBottom:18}}>
+              <div style={{fontSize:11,fontWeight:600,color:T.textDim,marginBottom:8,textTransform:"uppercase",letterSpacing:"0.04em"}}>How to get your API key</div>
+              {({bybit:"1. Bybit → Profile → API Management → Create New Key → select 'Read-Only' → copy API Key and Secret",binance:"1. Binance → Profile → API Management → Create API → enable 'Read Only' → copy Key and Secret",coinbase:"1. Coinbase → Settings → API → New API Key → check 'wallet:accounts:read' → copy Key",okx:"1. OKX → Account → API → Create API Key → select Read permission → copy Key and Secret",kucoin:"1. KuCoin → Profile → API Management → Create API → select Read-Only → copy Key, Secret, Passphrase"})[connectExchange].split("\n").map((s,i)=>(
+                <div key={i} style={{fontSize:11,color:T.textSub,lineHeight:1.6,marginBottom:4}}>{s}</div>
+              ))}
+            </div>
+
+            <div style={{display:"flex",gap:8}}>
+              <button className="btn" style={{flex:1,justifyContent:"center"}} onClick={()=>setShowConnect(false)}>Cancel</button>
+              <button className="btn btn-primary" style={{flex:1,justifyContent:"center"}} disabled={!connectKey.trim()} onClick={saveApiKey}>Connect {EXCHANGES.find(e=>e.id===connectExchange)?.name}</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Main layout */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 300px",gap:14}}>
+
+        {/* Left: prices + analysis */}
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+
+          {/* Coin grid */}
+          <div style={{display:"grid",gridTemplateColumns:"repeat(4,1fr)",gap:8}}>
+            {CRYPTO_COINS.map(coin=>{
+              const d=cryptoPrices[coin.id];
+              const isSelected=selected===coin.id;
+              const chg=d?.chg||0;
+              return (
+                <div key={coin.id} onClick={()=>setSelected(coin.id)}
+                  style={{cursor:"pointer",background:isSelected?coin.color+"18":T.surface,border:"2px solid "+(isSelected?coin.color:T.border),borderRadius:12,padding:"12px 14px",transition:"all .15s"}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:8}}>
+                    <div style={{width:32,height:32,borderRadius:8,background:coin.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:800,color:coin.color}}>{coin.id.slice(0,3)}</div>
+                    {d&&<span style={{fontSize:10,fontWeight:700,color:chg>=0?T.green:T.red,background:chg>=0?T.greenBg:T.redBg,padding:"2px 6px",borderRadius:4}}>{chg>=0?"+":""}{chg.toFixed(2)}%</span>}
+                  </div>
+                  <div style={{fontSize:11,fontWeight:600,color:isSelected?coin.color:T.textSub,marginBottom:2}}>{coin.id}</div>
+                  {loading&&!d?<div className="skeleton" style={{height:16,width:"80%",borderRadius:4}}/>:
+                  d?<div style={{fontSize:14,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:T.text}}>${d.price.toLocaleString(undefined,{maximumFractionDigits:d.price>100?2:4})}</div>:
+                  <div style={{fontSize:11,color:T.textDim}}>No data</div>}
+                  {d?.vol>0&&<div style={{fontSize:9,color:T.textDim,marginTop:2}}>Vol: {d.vol>1e9?(d.vol/1e9).toFixed(1)+"B":d.vol>1e6?(d.vol/1e6).toFixed(1)+"M":d.vol.toFixed(0)}</div>}
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Selected coin analysis */}
+          {selData&&sig&&(
+            <div className="card" style={{padding:"20px 22px",position:"relative",overflow:"hidden"}}>
+              <div style={{position:"absolute",left:0,top:0,bottom:0,width:4,background:sig.signal==="BUY"?T.green:sig.signal==="SELL"?T.red:T.purple}}/>
+              <div style={{position:"absolute",top:0,right:0,width:160,height:160,borderRadius:"50%",background:selCoin.bg,transform:"translate(30%,-30%)",pointerEvents:"none",opacity:.6}}/>
+              <div style={{paddingLeft:10}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
+                  <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                    <div style={{width:44,height:44,borderRadius:12,background:selCoin.bg,border:"1px solid "+selCoin.color+"40",display:"flex",alignItems:"center",justifyContent:"center",fontSize:15,fontWeight:800,color:selCoin.color}}>{selCoin.id}</div>
+                    <div>
+                      <div style={{fontSize:16,fontWeight:700}}>{selCoin.name}</div>
+                      <div style={{fontSize:11,color:T.textDim}}>via {EXCHANGES.find(e=>e.id===activeExchange)?.name} · 24h data</div>
+                    </div>
+                  </div>
+                  <div style={{textAlign:"right"}}>
+                    <div style={{background:sig.signal==="BUY"?T.greenBg:sig.signal==="SELL"?T.redBg:T.purpleBg,border:"1px solid "+(sig.signal==="BUY"?T.greenBorder:sig.signal==="SELL"?T.redBorder:"rgba(139,92,246,.3)"),borderRadius:8,padding:"5px 16px",fontSize:14,fontWeight:800,color:sig.signal==="BUY"?T.green:sig.signal==="SELL"?T.red:T.purple}}>{sig.signal}</div>
+                    <div style={{fontSize:10,color:T.textDim,marginTop:3,textAlign:"center"}}>Confidence {sig.conf}%</div>
+                  </div>
+                </div>
+                {/* Price */}
+                <div style={{display:"flex",alignItems:"baseline",gap:12,marginBottom:14}}>
+                  <span style={{fontSize:36,fontWeight:800,fontFamily:"'JetBrains Mono',monospace",letterSpacing:"-1.5px"}}>{sig.fmt(selData.price)}</span>
+                  <span style={{fontSize:15,fontWeight:700,color:selData.chg>=0?T.green:T.red,background:selData.chg>=0?T.greenBg:T.redBg,padding:"3px 10px",borderRadius:6}}>{selData.chg>=0?"+":""}{selData.chg.toFixed(2)}%</span>
+                </div>
+                {/* 24h range */}
+                {selData.high>0&&selData.low>0&&(
+                  <div style={{marginBottom:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:T.textDim,marginBottom:4}}>
+                      <span>24h Low: {sig.fmt(selData.low)}</span>
+                      <span>24h High: {sig.fmt(selData.high)}</span>
+                    </div>
+                    <div style={{height:6,background:T.bg,borderRadius:3,position:"relative"}}>
+                      <div style={{position:"absolute",left:0,top:0,bottom:0,width:(sig.rangePct*100)+"%",background:"linear-gradient(90deg,"+T.red+"50,"+selCoin.color+")",borderRadius:3}}/>
+                      <div style={{position:"absolute",top:"50%",left:(sig.rangePct*100)+"%",transform:"translate(-50%,-50%)",width:12,height:12,borderRadius:"50%",background:selCoin.color,border:"2px solid "+T.surface,boxShadow:"0 2px 6px rgba(0,0,0,.2)"}}/>
+                    </div>
+                  </div>
+                )}
+                {/* Key levels */}
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginBottom:14}}>
+                  {[{l:"Support",v:sig.fmt(sig.sup),c:T.green,bg:T.greenBg},{l:"Target",v:sig.fmt(sig.tgt),c:selCoin.color,bg:selCoin.bg},{l:"Resistance",v:sig.fmt(sig.res),c:T.red,bg:T.redBg}].map(lv=>(
+                    <div key={lv.l} style={{background:lv.bg,borderRadius:8,padding:"8px 10px",textAlign:"center"}}>
+                      <div style={{fontSize:9,color:T.textDim,marginBottom:3,textTransform:"uppercase",letterSpacing:"0.05em"}}>{lv.l}</div>
+                      <div style={{fontSize:12,fontWeight:700,color:lv.c,fontFamily:"'JetBrains Mono',monospace"}}>{lv.v}</div>
+                    </div>
+                  ))}
+                </div>
+                {/* Confidence */}
+                <div style={{marginBottom:14}}>
+                  <div style={{display:"flex",justifyContent:"space-between",fontSize:10,color:T.textDim,marginBottom:4}}>
+                    <span>Signal Strength</span>
+                    <span style={{fontWeight:600,color:sig.conf>=70?T.green:sig.conf>=55?T.amber:T.textDim}}>{sig.conf>=70?"Strong":sig.conf>=55?"Moderate":"Weak"} · {sig.conf}%</span>
+                  </div>
+                  <div style={{height:4,background:T.bg,borderRadius:2}}><div style={{height:"100%",width:sig.conf+"%",background:sig.conf>=70?T.green:sig.conf>=55?T.amber:T.textDim,borderRadius:2,transition:"width .6s"}}/></div>
+                </div>
+                {/* Volume */}
+                {selData.turnover>0&&(
+                  <div style={{display:"flex",gap:20,padding:"10px 12px",background:T.bg,borderRadius:8}}>
+                    <div><div style={{fontSize:9,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:2}}>24h Volume</div><div style={{fontSize:12,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:T.text}}>{selData.vol>1e6?(selData.vol/1e6).toFixed(2)+"M":selData.vol.toFixed(0)} {selCoin.id}</div></div>
+                    <div><div style={{fontSize:9,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:2}}>24h Turnover</div><div style={{fontSize:12,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:T.text}}>${selData.turnover>1e9?(selData.turnover/1e9).toFixed(2)+"B":selData.turnover>1e6?(selData.turnover/1e6).toFixed(2)+"M":selData.turnover.toFixed(0)}</div></div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* How to trade */}
+          {sig&&selData&&(
+            <div className="card" style={{padding:"16px 18px"}}>
+              <div style={{fontSize:12,fontWeight:700,color:sig.signal==="BUY"?T.green:sig.signal==="SELL"?T.red:T.purple,marginBottom:12,textTransform:"uppercase",letterSpacing:"0.05em"}}>How to Trade {selCoin.name} Now</div>
+              {(sig.signal==="BUY"?[
+                `Look for a pullback toward ${sig.fmt(sig.sup)} — enter long on green candle confirmation`,
+                `Target ${sig.fmt(sig.tgt)} (~${((sig.tgt-selData.price)/selData.price*100).toFixed(1)}% upside) · stop loss below ${sig.fmt(sig.sup)}`,
+                `Size down — crypto volatility is 5–10x higher than forex. Risk max 1% of account`,
+                `Watch BTC — if Bitcoin drops while ${selCoin.id} is bullish, wait for BTC to stabilise first`,
+              ]:sig.signal==="SELL"?[
+                `Wait for a bounce toward ${sig.fmt(sig.res)} before entering short — never chase the move`,
+                `Target ${sig.fmt(sig.tgt)} with stop above ${sig.fmt(sig.res)} — trail stop as price falls`,
+                `Crypto downtrends are fast — use market orders, not limit orders, to exit`,
+                `Check funding rates on your exchange — negative funding accelerates the downside`,
+              ]:[
+                `${selCoin.name} is consolidating between ${sig.fmt(sig.sup)} support and ${sig.fmt(sig.res)} resistance`,
+                `Wait for a decisive break — bullish above ${sig.fmt(sig.res)}, bearish below ${sig.fmt(sig.sup)}`,
+                `Volume is key: a breakout on high volume is real · on low volume it's a fakeout`,
+              ]).map((step,i)=>(
+                <div key={i} style={{display:"flex",gap:8,alignItems:"flex-start",marginBottom:i<3?8:0}}>
+                  <div style={{minWidth:18,height:18,borderRadius:5,background:selCoin.color+"25",border:"1px solid "+selCoin.color+"40",display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,color:selCoin.color,fontWeight:800,flexShrink:0,marginTop:1}}>{i+1}</div>
+                  <div style={{fontSize:12,color:T.textSub,lineHeight:1.65}}>{step}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Right: portfolio + market overview */}
+        <div style={{display:"flex",flexDirection:"column",gap:12}}>
+
+          {/* Connected exchange + portfolio */}
+          <div className="card" style={{overflow:"hidden"}}>
+            <div style={{padding:"12px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div>
+                <div style={{fontSize:12,fontWeight:600}}>Portfolio</div>
+                <div style={{fontSize:10,color:T.textDim,marginTop:1}}>{EXCHANGES.find(e=>e.id===activeExchange)?.name}</div>
+              </div>
+              <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                {apiKeys[activeExchange]?.key?(
+                  <>
+                    <div style={{width:6,height:6,borderRadius:"50%",background:T.green}}/>
+                    <span style={{fontSize:10,color:T.green,fontWeight:600}}>Connected</span>
+                    <button onClick={removeKey} style={{fontSize:10,background:"none",border:"none",color:T.textDim,cursor:"pointer",marginLeft:4}}>Disconnect</button>
+                  </>
+                ):(
+                  <button className="btn" style={{fontSize:10,padding:"3px 8px"}} onClick={()=>setShowConnect(true)}>Connect</button>
+                )}
+              </div>
+            </div>
+            <div style={{padding:"14px"}}>
+              {!apiKeys[activeExchange]?.key&&(
+                <div style={{textAlign:"center",padding:"24px 0"}}>
+                  <div style={{fontSize:24,opacity:.15,marginBottom:8,fontWeight:800}}>◈</div>
+                  <div style={{fontSize:12,color:T.textSub,marginBottom:12,lineHeight:1.6}}>Connect your {EXCHANGES.find(e=>e.id===activeExchange)?.name} account to see your real portfolio balance and positions</div>
+                  <button className="btn btn-primary" style={{fontSize:11}} onClick={()=>setShowConnect(true)}>Connect {EXCHANGES.find(e=>e.id===activeExchange)?.name}</button>
+                </div>
+              )}
+              {portfolioLd&&<div style={{display:"flex",alignItems:"center",gap:8,color:T.textSub,fontSize:12,padding:"8px 0"}}><Spinner size={13}/>Loading portfolio...</div>}
+              {portfolioErr&&<div style={{fontSize:12,color:T.red,padding:"8px 0"}}>{portfolioErr}</div>}
+              {portfolio&&!portfolioLd&&(()=>{
+                const balances=portfolio.balances||portfolio.assets||[];
+                const totalUSD=portfolio.totalUSD||portfolio.total||0;
+                return (
+                  <>
+                    <div style={{fontSize:22,fontWeight:800,color:T.text,fontFamily:"'JetBrains Mono',monospace",marginBottom:4}}>${totalUSD.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+                    <div style={{fontSize:11,color:T.textDim,marginBottom:12}}>Total portfolio value (USD)</div>
+                    {balances.filter(b=>parseFloat(b.free||b.amount||0)>0).slice(0,8).map((b,i)=>(
+                      <div key={i} className="trow" style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:7}}>
+                          <div style={{width:26,height:26,borderRadius:6,background:(CRYPTO_COINS.find(c=>c.id===b.coin||c.id===b.asset)?.bg)||T.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:700,color:(CRYPTO_COINS.find(c=>c.id===b.coin||c.id===b.asset)?.color)||T.textDim}}>
+                            {(b.coin||b.asset||"?").slice(0,3)}
+                          </div>
+                          <div>
+                            <div style={{fontSize:11,fontWeight:600}}>{b.coin||b.asset}</div>
+                            <div style={{fontSize:9,color:T.textDim}}>{parseFloat(b.free||b.amount||0).toFixed(4)}</div>
+                          </div>
+                        </div>
+                        <div style={{textAlign:"right"}}>
+                          <div style={{fontSize:12,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>${(parseFloat(b.usdValue||b.free_usd||0)).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+                        </div>
+                      </div>
+                    ))}
+                  </>
+                );
+              })()}
+            </div>
+          </div>
+
+          {/* Live market mini-table */}
+          <div className="card" style={{overflow:"hidden"}}>
+            <div style={{padding:"11px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <span style={{fontSize:12,fontWeight:600}}>Live Prices</span>
+              <div style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:T.textDim}}>
+                <div style={{width:5,height:5,borderRadius:"50%",background:T.green,animation:"pulse 2s infinite"}}/>
+                {EXCHANGES.find(e=>e.id===activeExchange)?.name}
+              </div>
+            </div>
+            {CRYPTO_COINS.map(coin=>{
+              const d=cryptoPrices[coin.id];
+              const chg=d?.chg||0;
+              return (
+                <div key={coin.id} className="trow" onClick={()=>setSelected(coin.id)}
+                  style={{padding:"9px 14px",display:"grid",gridTemplateColumns:"30px 1fr 80px 60px",gap:8,alignItems:"center",cursor:"pointer",background:selected===coin.id?coin.bg+"80":"transparent"}}>
+                  <div style={{width:26,height:26,borderRadius:7,background:coin.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:800,color:coin.color}}>{coin.id.slice(0,3)}</div>
+                  <div style={{fontSize:11,fontWeight:600,color:selected===coin.id?coin.color:T.text}}>{coin.id}<span style={{fontSize:9,color:T.textDim,marginLeft:4}}>{coin.name}</span></div>
+                  {d?<span style={{fontSize:11,fontWeight:700,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.text}}>${d.price.toLocaleString(undefined,{maximumFractionDigits:d.price>100?2:4})}</span>:<span className="skeleton" style={{height:11,borderRadius:3}}/>}
+                  {d?<span style={{fontSize:10,fontWeight:700,textAlign:"right",color:chg>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{chg>=0?"+":""}{chg.toFixed(2)}%</span>:<span className="skeleton" style={{height:11,borderRadius:3}}/>}
+                </div>
+              );
+            })}
+            <div style={{padding:"8px 14px",fontSize:10,color:T.textDim,textAlign:"center",borderTop:"1px solid "+T.border}}>
+              Refreshes every 30s · public API · no key required for prices
+            </div>
+          </div>
+
+          {/* Crypto rules */}
+          <div className="card" style={{padding:"14px 16px",background:"linear-gradient(135deg,rgba(247,147,26,0.05),rgba(98,126,234,0.05))"}}>
+            <div style={{fontSize:11,fontWeight:700,color:T.textSub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10}}>Crypto Risk Rules</div>
+            {["BTC leads — always check BTC direction first","Size down: crypto is 5–10x more volatile than forex","Never risk more than 1-2% per crypto trade","Funding rates matter — check before holding overnight","News & Twitter move crypto 40%+ in minutes"].map((tip,i)=>(
+              <div key={i} style={{display:"flex",gap:7,marginBottom:i<4?6:0,fontSize:11,color:T.textSub,lineHeight:1.5}}>
+                <span style={{color:T.amber,fontWeight:700,flexShrink:0}}>{i+1}.</span><span>{tip}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── SETUP ─────────────────────────────────────────────────────
 function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,accounts,setAccounts,activeAccount,setActiveAccount}){
   const [rlInput,setRlInput]=useState(riskLimit||"");
@@ -2212,7 +2690,7 @@ export default function TradeLedger(){
   const onAddSymbol=sym=>{const next=[...watchlist.filter(s=>s!==sym),sym];setWatchlist(next);try{localStorage.setItem("tl_wl",JSON.stringify(next));}catch{}};
   const onRemoveSymbol=sym=>{const next=watchlist.filter(s=>s!==sym);setWatchlist(next);try{localStorage.setItem("tl_wl",JSON.stringify(next));}catch{}};
 
-  const NAV=[{id:"watchlist",icon:"◈",label:"Watchlist"},{id:"dashboard",icon:"▦",label:"Dashboard"},{id:"analytics",icon:"◎",label:"Analytics"},{id:"journal",icon:"[+]",label:"Journal"},{id:"calendar",icon:"◷",label:"Calendar"},{id:"news",icon:"◉",label:"News"},{id:"setup",icon:"o",label:"Setup"}];
+  const NAV=[{id:"watchlist",icon:"◈",label:"Watchlist"},{id:"dashboard",icon:"▦",label:"Dashboard"},{id:"analytics",icon:"◎",label:"Analytics"},{id:"crypto",icon:"◆",label:"Crypto"},{id:"journal",icon:"[+]",label:"Journal"},{id:"calendar",icon:"◷",label:"Calendar"},{id:"news",icon:"◉",label:"News"},{id:"setup",icon:"o",label:"Setup"}];
   const [clockTick,setClockTick]=useState(0);
   useEffect(()=>{const t=setInterval(()=>setClockTick(n=>n+1),30000);return()=>clearInterval(t);},[]);
   const now=new Date(),utcStr=now.toUTCString().slice(17,22)+" UTC",localStr=now.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});
@@ -2343,6 +2821,7 @@ export default function TradeLedger(){
             {tab==="analytics"&&<AnalyticsTab trades={trades} stats={stats} weeklyAI={weeklyAI} genWeeklyAI={genWeeklyAI}/>}
             {tab==="calendar"&&<CalendarTab trades={trades} todayNews={todayNews}/>}
             {tab==="news"&&<NewsTab savedNews={savedNews} setSavedNews={setSavedNews} fetchNews={fetchNews} newsLd={newsLd} openArticle={openArticle} searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchResults={searchResults} searchLd={searchLd} searchErr={searchErr} fetchMarketSearch={fetchMarketSearch}/>}
+            {tab==="crypto"&&<CryptoTab prices={prices} pFlash={pFlash} trades={trades} onAddSymbol={onAddSymbol}/>}
             {tab==="journal"&&<JournalTab trades={trades}/>}
             {tab==="setup"&&<SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit} goals={goals} setGoals={setGoals} accounts={accounts} setAccounts={setAccounts} activeAccount={activeAccount} setActiveAccount={setActiveAccount}/>}
           </div>
