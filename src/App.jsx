@@ -2010,11 +2010,14 @@ async function fetchCoinbasePrice(symbol){
 }
 
 // Fetch portfolio from exchange using API key — server-side proxy
-async function fetchExchangePortfolio(exchange, apiKey, apiSecret){
+async function fetchExchangePortfolio(exchange, apiKey, apiSecret, passphrase){
   try{
-    const r=await fetch(SERVER+"/api/crypto-portfolio?exchange="+exchange+"&key="+encodeURIComponent(apiKey)+"&secret="+encodeURIComponent(apiSecret),{signal:AbortSignal.timeout(15000)});
-    if(!r.ok)throw new Error("Server error "+r.status);
-    return await r.json();
+    let url=SERVER+"/api/crypto-portfolio?exchange="+exchange+"&key="+encodeURIComponent(apiKey)+"&secret="+encodeURIComponent(apiSecret||"");
+    if(passphrase)url+="&passphrase="+encodeURIComponent(passphrase);
+    const r=await fetch(url,{signal:AbortSignal.timeout(15000)});
+    const data=await r.json();
+    if(!r.ok)return{error:data?.error||"Server error "+r.status};
+    return data;
   }catch(e){return{error:e.message};}
 }
 
@@ -2039,6 +2042,7 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
   const [connectExchange, setConnectExchange]=useState("bybit");
   const [connectKey, setConnectKey]=useState("");
   const [connectSecret, setConnectSecret]=useState("");
+  const [connectPassphrase, setConnectPassphrase]=useState("");
   const [portfolio, setPortfolio]=useState(null);
   const [portfolioLd, setPortfolioLd]=useState(false);
   const [portfolioErr, setPortfolioErr]=useState(null);
@@ -2067,7 +2071,7 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
     const keys=apiKeys[activeExchange];
     if(!keys?.key)return;
     setPortfolioLd(true);setPortfolioErr(null);
-    const res=await fetchExchangePortfolio(activeExchange,keys.key,keys.secret||"");
+    const res=await fetchExchangePortfolio(activeExchange,keys.key,keys.secret||"",keys.passphrase||"");
     if(res.error)setPortfolioErr(res.error);
     else setPortfolio(res);
     setPortfolioLd(false);
@@ -2077,10 +2081,10 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
 
   const saveApiKey=()=>{
     if(!connectKey.trim())return;
-    const nk={...apiKeys,[connectExchange]:{key:connectKey.trim(),secret:connectSecret.trim()}};
+    const nk={...apiKeys,[connectExchange]:{key:connectKey.trim(),secret:connectSecret.trim(),passphrase:connectPassphrase.trim()}};
     setApiKeys(nk);try{localStorage.setItem("tl_cx_keys",JSON.stringify(nk));}catch{}
     setActiveExchange(connectExchange);try{localStorage.setItem("tl_cx_active",connectExchange);}catch{}
-    setShowConnect(false);setConnectKey("");setConnectSecret("");
+    setShowConnect(false);setConnectKey("");setConnectSecret("");setConnectPassphrase("");
     setTimeout(loadPortfolio,500);
   };
 
