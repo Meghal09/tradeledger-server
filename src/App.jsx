@@ -420,6 +420,32 @@ function DashboardTab({trades,stats,serverOk,lastSync}){
         </div>
       </div>
 
+      {/* TRADING DNA */}
+      {fStats&&(()=>{
+        const rr=parseFloat(fStats.rr)||0;
+        const style=fStats.winRate>=60&&rr<1.2?"Sniper — high accuracy, small wins. Focus on R:R, not more trades.":fStats.winRate<45&&rr>=1.5?"Swing Hunter — few wins but big when right. Stay patient, let winners run.":fStats.winRate>=55&&rr>=1.3?"Balanced Trader — solid foundation. Scale up 10% and tighten your worst symbol.":fStats.maxDD>15?"Risk-Taker — your edge is real but drawdowns threaten it. Cut size on losing days.":fStats.tradesPerDay>6?"Overtrader — too many trades dilutes your edge. Pick your 3 best setups only.":"Developing Trader — patterns forming. Journal every trade this week to find your real edge.";
+        const strengths=[];const warnings=[];
+        if(fStats.winRate>=55)strengths.push("strong win rate");if(rr>=1.5)strengths.push("excellent R:R");if(fStats.pf>=1.8)strengths.push("high profit factor");if(fStats.maxCW>=5)strengths.push("proven winning streaks");
+        if(fStats.maxDD>15)warnings.push("drawdown risk");if(fStats.maxCL>=4)warnings.push("loss streaks");if(fStats.tradesPerDay>7)warnings.push("overtrading");if(rr<1)warnings.push("poor risk-reward");
+        const dnaColor=fStats.totalProfit>=0?T.blue:T.amber;
+        return (
+          <div className="card" style={{padding:"16px 20px",marginBottom:12,background:"linear-gradient(135deg,"+dnaColor+"08,"+dnaColor+"04)",border:"1px solid "+dnaColor+"25",position:"relative",overflow:"hidden"}}>
+            <div style={{position:"absolute",right:-20,top:-20,width:100,height:100,borderRadius:"50%",background:dnaColor+"10",pointerEvents:"none"}}/>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:20}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:10,color:dnaColor,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:6}}>Your Trading DNA — {period==="all"?"All Time":period}</div>
+                <div style={{fontSize:14,fontWeight:700,color:T.text,marginBottom:6}}>{style.split("—")[0].trim()}</div>
+                <div style={{fontSize:12,color:T.textSub,lineHeight:1.7}}>{style.split("—").slice(1).join("—").trim()}</div>
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
+                {strengths.slice(0,2).map(s=><div key={s} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:T.green,background:T.greenBg,border:"1px solid "+T.greenBorder,borderRadius:5,padding:"2px 8px",whiteSpace:"nowrap"}}><span>+</span>{s}</div>)}
+                {warnings.slice(0,2).map(w=><div key={w} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:T.amber,background:T.amberBg,border:"1px solid rgba(245,158,11,.25)",borderRadius:5,padding:"2px 8px",whiteSpace:"nowrap"}}><span>!</span>{w}</div>)}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ROW 3: Calendar heatmap + Recent Trades */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 380px",gap:12}}>
 
@@ -741,10 +767,87 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
               </>
             );
           })():(
-            <div className="card" style={{padding:32,textAlign:"center",color:T.textSub,fontSize:13,display:"flex",flexDirection:"column",gap:8,alignItems:"center",justifyContent:"center",height:"100%"}}>
-              <div style={{fontSize:28,opacity:0.2,marginBottom:4}}>◈</div>
-              <div style={{fontWeight:600,color:T.text}}>Select a symbol</div>
-              <div style={{fontSize:12}}>Click any row on the left to see detailed market analysis, support/resistance levels, and your personal trade history for that symbol.</div>
+            <div style={{display:"flex",flexDirection:"column",gap:12}}>
+              {/* Price alert setter */}
+              {(()=>{
+                const [alertSym,setAlertSym]=React.useState(watchlist[0]||"");
+                const [alertPrice,setAlertPrice]=React.useState("");
+                const [alertDir,setAlertDir]=React.useState("above");
+                const [alerts,setAlerts]=React.useState(()=>{try{return JSON.parse(localStorage.getItem("tl_price_alerts")||"[]");}catch{return[];}});
+                const saveAlert=()=>{
+                  if(!alertSym||!alertPrice)return;
+                  const a={id:Date.now(),sym:alertSym,price:parseFloat(alertPrice),dir:alertDir,created:new Date().toISOString(),triggered:false};
+                  const next=[...alerts,a];setAlerts(next);try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}
+                  setAlertPrice("");
+                  if(Notification.permission==="default")Notification.requestPermission();
+                };
+                // Check alerts against live prices
+                React.useEffect(()=>{
+                  if(!alerts.length)return;
+                  alerts.forEach(al=>{
+                    if(al.triggered)return;
+                    const q=prices[al.sym];if(!q?.price)return;
+                    const cur=parseFloat(q.price);
+                    const hit=(al.dir==="above"&&cur>=al.price)||(al.dir==="below"&&cur<=al.price);
+                    if(hit){
+                      const next=alerts.map(a=>a.id===al.id?{...a,triggered:true}:a);
+                      setAlerts(next);try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}
+                      if(Notification.permission==="granted"){new Notification("TradeLedger Alert",{body:al.sym+" is "+al.dir+" $"+al.price+" — now at $"+cur,icon:"/favicon.ico"});}
+                    }
+                  });
+                },[prices,alerts]);
+                const removeAlert=id=>{const next=alerts.filter(a=>a.id!==id);setAlerts(next);try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}};
+                return (
+                  <div className="card" style={{padding:"16px 18px"}}>
+                    <div style={{fontSize:13,fontWeight:600,marginBottom:3}}>Price Alerts</div>
+                    <div style={{fontSize:11,color:T.textSub,marginBottom:12}}>Get a browser notification when any symbol hits your target price</div>
+                    <div style={{display:"grid",gridTemplateColumns:"1fr 80px 110px auto",gap:8,alignItems:"end",marginBottom:12}}>
+                      <div>
+                        <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Symbol</div>
+                        <select className="input" value={alertSym} onChange={e=>setAlertSym(e.target.value)} style={{fontSize:12}}>
+                          {watchlist.map(s=><option key={s} value={s}>{s}</option>)}
+                        </select>
+                      </div>
+                      <div>
+                        <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Direction</div>
+                        <select className="input" value={alertDir} onChange={e=>setAlertDir(e.target.value)} style={{fontSize:12}}>
+                          <option value="above">Above</option>
+                          <option value="below">Below</option>
+                        </select>
+                      </div>
+                      <div>
+                        <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Price</div>
+                        <input className="input" type="number" step="any" placeholder="e.g. 1.1000" value={alertPrice} onChange={e=>setAlertPrice(e.target.value)} style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
+                      </div>
+                      <button className="btn btn-primary" onClick={saveAlert} disabled={!alertPrice||!alertSym} style={{fontSize:11}}>Set Alert</button>
+                    </div>
+                    {alerts.length>0&&(
+                      <div style={{display:"flex",flexDirection:"column",gap:5}}>
+                        {alerts.map(al=>{
+                          const q=prices[al.sym];const cur=q?parseFloat(q.price):null;
+                          const pct=cur?((cur-al.price)/al.price*100):null;
+                          return (
+                            <div key={al.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:8,background:al.triggered?T.greenBg:T.bg,border:"1px solid "+(al.triggered?T.greenBorder:T.border)}}>
+                              <div style={{flex:1}}>
+                                <span style={{fontSize:11,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{al.sym}</span>
+                                <span style={{fontSize:11,color:T.textSub,marginLeft:6}}>{al.dir} ${al.price}</span>
+                                {pct!==null&&<span style={{fontSize:10,color:Math.abs(pct)<1?T.amber:T.textDim,marginLeft:6}}>{pct>=0?"+":""}{pct.toFixed(2)}% away</span>}
+                              </div>
+                              {al.triggered&&<Badge color="green">Triggered</Badge>}
+                              <button onClick={()=>removeAlert(al.id)} style={{background:"none",border:"none",color:T.textDim,cursor:"pointer",fontSize:15,lineHeight:1}}>x</button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+              <div className="card" style={{padding:24,textAlign:"center",color:T.textSub,fontSize:13}}>
+                <div style={{fontSize:24,opacity:0.2,marginBottom:8}}>◈</div>
+                <div style={{fontWeight:600,color:T.text,marginBottom:4}}>Select a symbol</div>
+                <div style={{fontSize:12}}>Click any row on the left to see detailed market analysis, support/resistance levels, and your trade history.</div>
+              </div>
             </div>
           )}
         </div>
@@ -1044,6 +1147,62 @@ $${cell.profit.toFixed(2)}`:"No trades"} style={{height:20,borderRadius:3,backgr
 
       </>}
 
+      {/* BEST SETUP FINDER */}
+      {(activeSection==="overview"||activeSection==="deepstats")&&trades.length>=10&&(()=>{
+        // Find best combination of hour + day + symbol
+        const combos={};
+        trades.forEach(t=>{
+          const h=mt5Hour(t.openTime);
+          const d=parseMT5Date(t.openTime);
+          if(h===null||!d||!t.symbol)return;
+          const dow=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][d.getDay()];
+          const session=h>=0&&h<8?"Asian":h>=8&&h<13?"London":h>=13&&h<17?"Overlap":"NY";
+          const key=t.symbol+"|"+session+"|"+dow;
+          if(!combos[key])combos[key]={sym:t.symbol,session,dow,wins:0,losses:0,profit:0,trades:0};
+          combos[key].trades++;
+          combos[key].profit+=((t.profit||0)+(t.swap||0)+(t.commission||0));
+          if(t.profit>0)combos[key].wins++;else combos[key].losses++;
+        });
+        const ranked=Object.values(combos).filter(c=>c.trades>=3).map(c=>({...c,profit:+c.profit.toFixed(2),wr:Math.round(c.wins/c.trades*100)})).sort((a,b)=>b.profit-a.profit);
+        const best=ranked.slice(0,3),worst=ranked.filter(c=>c.profit<0).sort((a,b)=>a.profit-b.profit).slice(0,2);
+        if(!best.length)return null;
+        return (
+          <div className="card" style={{marginBottom:14,overflow:"hidden"}}>
+            <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+              <div><div style={{fontSize:13,fontWeight:600}}>Best Trade Setup Finder</div><div style={{fontSize:11,color:T.textSub,marginTop:1}}>Your most profitable symbol + session + day combinations</div></div>
+            </div>
+            <div style={{padding:"14px 16px",display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
+              <div>
+                <div style={{fontSize:10,color:T.green,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:8}}>Double Down On These</div>
+                {best.map((c,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",borderRadius:8,background:T.greenBg,border:"1px solid "+T.greenBorder,marginBottom:6}}>
+                    <div style={{width:22,height:22,borderRadius:6,background:T.green+"25",display:"flex",alignItems:"center",justifyContent:"center",fontSize:10,fontWeight:800,color:T.green}}>{i+1}</div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:12,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{c.sym} <span style={{fontSize:10,fontWeight:400,color:T.textSub}}>· {c.session} · {c.dow}</span></div>
+                      <div style={{fontSize:10,color:T.textDim,marginTop:2}}>{c.trades} trades · {c.wr}% WR</div>
+                    </div>
+                    <div style={{fontSize:13,fontWeight:700,color:T.green,fontFamily:"'JetBrains Mono',monospace"}}>+${c.profit}</div>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <div style={{fontSize:10,color:T.red,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:8}}>Avoid These Completely</div>
+                {worst.length?worst.map((c,i)=>(
+                  <div key={i} style={{display:"flex",alignItems:"center",gap:10,padding:"9px 12px",borderRadius:8,background:T.redBg,border:"1px solid "+T.redBorder,marginBottom:6}}>
+                    <div style={{width:22,height:22,borderRadius:6,background:T.red+"25",display:"flex",alignItems:"center",justifyContent:"center",fontSize:14,color:T.red}}>!</div>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:12,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{c.sym} <span style={{fontSize:10,fontWeight:400,color:T.textSub}}>· {c.session} · {c.dow}</span></div>
+                      <div style={{fontSize:10,color:T.textDim,marginTop:2}}>{c.trades} trades · {c.wr}% WR</div>
+                    </div>
+                    <div style={{fontSize:13,fontWeight:700,color:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{c.profit}</div>
+                  </div>
+                )):<div style={{fontSize:12,color:T.textDim,padding:"10px 0"}}>No consistently losing combos found.</div>}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {/* AI COACH section */}
       {(activeSection==="coach"||activeSection==="overview")&&<div className="card" style={{marginBottom:4}}>
         <div style={{padding:"14px 16px",borderBottom:`1px solid ${T.border}`,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
@@ -1117,6 +1276,32 @@ function CalendarTab({trades,todayNews}){
 
   return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:8}}>
+      {/* Week comparison strip */}
+      {(()=>{
+        const now=new Date();
+        const thisMonStart=new Date(now);thisMonStart.setDate(now.getDate()-((now.getDay()+6)%7));thisMonStart.setHours(0,0,0,0);
+        const lastMonStart=new Date(thisMonStart);lastMonStart.setDate(lastMonStart.getDate()-7);
+        const lastMonEnd=new Date(thisMonStart);
+        const thisW=trades.filter(t=>{const d=parseMT5Date(t.closeTime);return d&&d>=thisMonStart;});
+        const lastW=trades.filter(t=>{const d=parseMT5Date(t.closeTime);return d&&d>=lastMonStart&&d<lastMonEnd;});
+        const thisPnl=+thisW.reduce((s,t)=>s+(t.profit||0)+(t.swap||0)+(t.commission||0),0).toFixed(2);
+        const lastPnl=+lastW.reduce((s,t)=>s+(t.profit||0)+(t.swap||0)+(t.commission||0),0).toFixed(2);
+        const diff=+(thisPnl-lastPnl).toFixed(2);
+        if(!thisW.length&&!lastW.length)return null;
+        return (
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:10,marginBottom:14}}>
+            {[{l:"This Week",v:"$"+thisPnl,t:thisW.length+" trades",c:thisPnl>=0?T.green:T.red},{l:"Last Week",v:"$"+lastPnl,t:lastW.length+" trades",c:lastPnl>=0?T.green:T.red},{l:"Week-on-Week",v:(diff>=0?"+":"")+diff,t:diff>0?"Better":"Worse",c:diff>=0?T.green:T.red}].map(x=>(
+              <div key={x.l} className="card" style={{padding:"11px 14px",position:"relative",overflow:"hidden"}}>
+                <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:x.c}}/>
+                <div style={{fontSize:10,color:T.textSub,fontWeight:500,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4,marginTop:2}}>{x.l}</div>
+                <div style={{fontSize:18,fontWeight:700,color:x.c,fontFamily:"'JetBrains Mono',monospace"}}>{x.v}</div>
+                <div style={{fontSize:10,color:T.textDim,marginTop:2}}>{x.t}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
         <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Calendar</h1>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -1404,6 +1589,36 @@ function NewsTab({savedNews,setSavedNews,fetchNews,newsLd,openArticle,searchQuer
           </div>
         </div>
       )}
+
+      {/* Symbol news radar — latest headline per saved symbol */}
+      {savedNews.length>0&&(()=>{
+        const watched=["XAUUSD","BTCUSD","EURUSD","GBPUSD","USDJPY","NAS100","USOIL"];
+        const keywordMap={XAUUSD:["gold","xau","bullion"],BTCUSD:["bitcoin","btc","crypto"],EURUSD:["euro","eur","ecb"],GBPUSD:["pound","gbp","boe"],USDJPY:["yen","jpy","japan","boj"],NAS100:["nasdaq","tech","nasdaq100"],USOIL:["oil","crude","opec","wti"]};
+        const matches=watched.map(sym=>{const kws=keywordMap[sym]||[sym.toLowerCase()];const latest=savedNews.find(a=>{const t=(a.title||"").toLowerCase()+" "+(a.description||"").toLowerCase();return kws.some(k=>t.includes(k));});return latest?{sym,article:latest}:null;}).filter(Boolean).slice(0,4);
+        if(!matches.length)return null;
+        return (
+          <div style={{marginBottom:14}}>
+            <div style={{fontSize:10,fontWeight:700,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:8}}>Symbol News Radar</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:8}}>
+              {matches.map(({sym,article})=>{
+                const d=article.pubDate?new Date(article.pubDate):null;
+                const minsAgo=d?Math.floor((Date.now()-d)/60000):null;
+                const age=minsAgo===null?"":minsAgo<60?minsAgo+"m ago":Math.floor(minsAgo/60)+"h ago";
+                const isNew=minsAgo!==null&&minsAgo<60;
+                return (
+                  <div key={sym} className="card" style={{padding:"11px 13px",cursor:"pointer",borderLeft:"3px solid "+(isNew?T.green:T.border)}} onClick={()=>openArticle(article)}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:5}}>
+                      <span style={{fontSize:11,fontWeight:800,fontFamily:"'JetBrains Mono',monospace",color:isNew?T.green:T.textSub}}>{sym}</span>
+                      <span style={{fontSize:9,color:isNew?T.green:T.textDim,fontFamily:"'JetBrains Mono',monospace"}}>{age}</span>
+                    </div>
+                    <div style={{fontSize:11,color:T.text,lineHeight:1.5,fontWeight:500}}>{(article.title||"").slice(0,80)}{(article.title||"").length>80?"...":""}</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Archive header */}
       <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
@@ -1876,6 +2091,40 @@ function JournalTab({trades}){
           ))}
         </div>
       )}
+
+      {/* Discipline Score */}
+      {entries.length>=5&&(()=>{
+        const recent=entries.slice(0,10);
+        const logsWithEmotion=recent.filter(e=>e.emotion).length;
+        const logsWithReason=recent.filter(e=>e.reason).length;
+        const logsWithLesson=recent.filter(e=>e.lessons).length;
+        const logsWithScreenshot=recent.filter(e=>e.screenshot).length;
+        const logsWithMistakes=recent.filter(e=>e.mistakes).length;
+        const score=Math.round((logsWithEmotion+logsWithReason+logsWithLesson+logsWithScreenshot+logsWithMistakes)/(recent.length*5)*100);
+        const scoreColor=score>=80?T.green:score>=50?T.amber:T.red;
+        const scoreLabel=score>=80?"Elite":score>=60?"Disciplined":score>=40?"Developing":"Inconsistent";
+        // Current streak
+        let streak=0,streakType=entries[0]?.outcome;
+        for(const e of entries){if(e.outcome===streakType)streak++;else break;}
+        const avgRating=entries.length?+(entries.slice(0,10).reduce((s,e)=>s+(e.rating||3),0)/Math.min(entries.length,10)).toFixed(1):0;
+        return (
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:10,marginBottom:14}}>
+            {[
+              {l:"Discipline Score",v:score+"%",sub:scoreLabel,c:scoreColor},
+              {l:"Current Streak",v:streak+(streakType==="win"?" W":" L"),sub:streakType==="win"?"Winning":"Losing",c:streakType==="win"?T.green:T.red},
+              {l:"Avg Self Rating",v:avgRating+"/5",sub:"Last 10 trades",c:avgRating>=4?T.green:avgRating>=3?T.amber:T.red},
+              {l:"Journal Quality",v:Math.round((logsWithScreenshot+logsWithLesson)/Math.min(entries.length,10)/2*100)+"%",sub:"Screenshot + lessons",c:T.blue},
+            ].map(x=>(
+              <div key={x.l} className="card" style={{padding:"12px 14px",position:"relative",overflow:"hidden"}}>
+                <div style={{position:"absolute",top:0,left:0,right:0,height:3,background:x.c}}/>
+                <div style={{fontSize:9,color:T.textSub,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4,marginTop:2}}>{x.l}</div>
+                <div style={{fontSize:18,fontWeight:700,color:x.c,fontFamily:"'JetBrains Mono',monospace"}}>{x.v}</div>
+                <div style={{fontSize:10,color:T.textDim,marginTop:2}}>{x.sub}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
 
       {entries.length===0?(
         <div className="card" style={{padding:"48px 24px",textAlign:"center"}}>
@@ -2423,6 +2672,33 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
             </div>
           </div>
 
+          {/* BTC Dominance Pulse */}
+          {cryptoPrices["BTC"]&&(()=>{
+            const btc=cryptoPrices["BTC"],eth=cryptoPrices["ETH"],sol=cryptoPrices["SOL"];
+            const btcChg=btc.chg||0,ethChg=eth?.chg||0,solChg=sol?.chg||0;
+            const altsFollowing=Math.abs(ethChg-btcChg)<1.5&&Math.abs(solChg-btcChg)<2;
+            const altsSurging=ethChg>btcChg+2||solChg>btcChg+2;
+            const altsWeak=ethChg<btcChg-2||solChg<btcChg-2;
+            const regime=altsWeak?"BTC Season — alts lagging":altsSurging?"Alt Season — alts outperforming BTC":altsFollowing?"Correlated — alts following BTC":"Diverging — mixed signals";
+            const regimeColor=altsSurging?T.purple:altsWeak?T.amber:altsFollowing?T.blue:T.textSub;
+            const advice=altsWeak?"Stick to BTC/ETH only when alts underperform":altsSurging?"Momentum in alts — SOL, BNB setups valid":altsFollowing?"BTC direction dictates all alts right now":"Wait for clearer signal before entering alts";
+            return (
+              <div className="card" style={{padding:"14px 16px",marginBottom:12}}>
+                <div style={{fontSize:10,fontWeight:700,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10}}>Market Regime</div>
+                <div style={{fontSize:14,fontWeight:700,color:regimeColor,marginBottom:5}}>{regime}</div>
+                <div style={{fontSize:11,color:T.textSub,lineHeight:1.6,marginBottom:10}}>{advice}</div>
+                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
+                  {[{l:"BTC",v:btcChg},{l:"ETH",v:ethChg},{l:"SOL",v:solChg}].map(x=>(
+                    <div key={x.l} style={{background:T.bg,borderRadius:7,padding:"6px 8px",textAlign:"center"}}>
+                      <div style={{fontSize:9,color:T.textDim,marginBottom:2}}>{x.l}</div>
+                      <div style={{fontSize:12,fontWeight:700,color:x.v>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{x.v>=0?"+":""}{x.v.toFixed(2)}%</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            );
+          })()}
+
           {/* Crypto rules */}
           <div className="card" style={{padding:"14px 16px",background:"linear-gradient(135deg,rgba(247,147,26,0.05),rgba(98,126,234,0.05))"}}>
             <div style={{fontSize:11,fontWeight:700,color:T.textSub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10}}>Crypto Risk Rules</div>
@@ -2458,6 +2734,27 @@ function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,account
             <div style={{fontSize:11,color:T.textDim,marginTop:2}}>{x.sub}</div>
           </div>
         ))}
+      </div>
+
+      {/* System Health Check */}
+      <div className="card" style={{padding:"14px 18px",marginBottom:14,background:"linear-gradient(135deg,rgba(79,128,255,.04),rgba(0,196,140,.03))"}}>
+        <div style={{fontSize:12,fontWeight:600,marginBottom:12}}>System Health Check</div>
+        <div style={{display:"flex",flexDirection:"column",gap:8}}>
+          {[
+            {l:"Railway Server",ok:serverOk,msg:serverOk?"Connected and receiving data":"Server unreachable — check Railway deployment"},
+            {l:"Trade Data",ok:trades.length>0,msg:trades.length>0?trades.length+" trades loaded — EA is working":"No trades received — is your MT5 EA running?"},
+            {l:"Live Prices",ok:Object.keys(prices||{}).length>0,msg:Object.keys(prices||{}).length>0?Object.keys(prices||{}).length+" symbols loading":"Prices not loading — check your internet connection"},
+            {l:"Auth Token",ok:true,msg:"Token TL-S7PDZ3UV is set"},
+          ].map(item=>(
+            <div key={item.l} style={{display:"flex",alignItems:"center",gap:10,padding:"8px 10px",borderRadius:8,background:item.ok?T.greenBg:T.redBg,border:"1px solid "+(item.ok?T.greenBorder:T.redBorder)}}>
+              <div style={{width:8,height:8,borderRadius:"50%",background:item.ok?T.green:T.red,flexShrink:0}}/>
+              <div style={{flex:1}}>
+                <span style={{fontSize:12,fontWeight:600,color:item.ok?T.green:T.red}}>{item.l}</span>
+                <span style={{fontSize:11,color:T.textSub,marginLeft:8}}>{item.msg}</span>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
 
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14}}>
