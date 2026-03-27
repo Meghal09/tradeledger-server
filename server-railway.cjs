@@ -1298,7 +1298,7 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
       if (!res.headersSent) json(res, 200, { query:"timeout", articles:[], aiSummary:null, generatedAt:new Date().toISOString() });
     }, 18000);
     try {
-      const q = (new URL(req.url, "http://localhost").searchParams.get("q") || "").trim().toLowerCase();
+      const q = (new URL("http://x" + url).searchParams.get("q") || "").trim().toLowerCase();
       if (!q) return json(res, 400, { error: "Missing query param q" });
 
       const https = require("https");
@@ -1412,6 +1412,238 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
     } catch(e) {
       clearTimeout(searchTimeout);
       console.warn("[MARKETSEARCH] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
+
+  // GET /api/crypto-portfolio?exchange=bybit&key=XXX&secret=YYY
+  // Fetches real portfolio balance from exchange using read-only API key
+  // All signing done server-side — key never exposed to browser network tab
+  if (req.method === "GET" && url === "/api/crypto-portfolio") {
+    try {
+      const qs = new URL(req.url, "http://localhost").searchParams;
+      const exchange = (qs.get("exchange") || "").toLowerCase();
+      const apiKey   = qs.get("key")    || "";
+      const secret   = qs.get("secret") || "";
+      if (!apiKey) return json(res, 400, { error: "Missing API key" });
+
+      const https  = require("https");
+      const crypto = require("crypto");
+
+      // ── HMAC helpers ──────────────────────────────────────────
+      const hmac256 = (data, key) =>
+        crypto.createHmac("sha256", key).update(data).digest("hex");
+
+      const httpsGet = (hostname, path, headers) => new Promise((resolve, reject) => {
+        const r = https.request({ hostname, path, method: "GET", headers, timeout: 10000 }, resp => {
+          let d = "";
+          resp.on("data", c => d += c);
+          resp.on("end", () => {
+            try { resolve({ status: resp.statusCode, body: JSON.parse(d) }); }
+            catch { resolve({ status: resp.statusCode, body: d }); }
+          });
+        });
+        r.on("error", reject);
+        r.on("timeout", () => { r.destroy(); reject(new Error("Timeout")); });
+        r.end();
+      });
+
+      // ════════════════════════════════════════════════════════════
+      // BYBIT — unified account balance
+      // ════════════════════════════════════════════════════════════
+      if (exchange === "bybit") {
+        const ts        = Date.now().toString();
+        const recvWindow = "5000";
+        const queryStr  = "accountType=UNIFIED";
+        const signInput = ts + apiKey + recvWindow + queryStr;
+        const signature = hmac256(signInput, secret);
+        const headers   = {
+          "X-BAPI-API-KEY":    apiKey,
+          "X-BAPI-TIMESTAMP":  ts,
+          "X-BAPI-RECV-WINDOW": recvWindow,
+          "X-BAPI-SIGN":       signature,
+          "Content-Type":      "application/json",
+        };
+        const { status, body } = await httpsGet(
+          "api.bybit.com",
+          "/v5/account/wallet-balance?" + queryStr,
+          headers
+        );
+        if (status !== 200 || body?.retCode !== 0) {
+          console.warn("[CRYPTO] Bybit error:", body?.retMsg || status);
+          return json(res, 400, { error: body?.retMsg || "Bybit API error " + status });
+        }
+        const list = body?.result?.list || [];
+        const coins = list.flatMap(acct => acct.coin || []);
+        const balances = coins
+          .filter(c => parseFloat(c.walletBalance || 0) > 0)
+          .map(c => ({
+            coin:     c.coin,
+            free:     parseFloat(c.availableToWithdraw || c.walletBalance || 0),
+            locked:   parseFloat(c.locked || 0),
+            total:    parseFloat(c.walletBalance || 0),
+            usdValue: parseFloat(c.usdValue || 0),
+          }));
+        const totalUSD = balances.reduce((s, b) => s + b.usdValue, 0);
+        console.log("[CRYPTO] Bybit portfolio: " + balances.length + " coins, $" + totalUSD.toFixed(2));
+        return json(res, 200, { exchange: "bybit", balances, totalUSD: +totalUSD.toFixed(2), fetchedAt: new Date().toISOString() });
+      }
+
+      // ════════════════════════════════════════════════════════════
+      // BINANCE — spot account balance
+      // ════════════════════════════════════════════════════════════
+      if (exchange === "binance") {
+        const ts       = Date.now().toString();
+        const queryStr = "timestamp=" + ts;
+        const signature = hmac256(queryStr, secret);
+        const fullQuery = queryStr + "&signature=" + signature;
+        const { status, body } = await httpsGet(
+          "api.binance.com",
+          "/api/v3/account?" + fullQuery,
+          { "X-MBX-APIKEY": apiKey, "Content-Type": "application/json" }
+        );
+        if (status !== 200 || body?.code) {
+          console.warn("[CRYPTO] Binance error:", body?.msg || status);
+          return json(res, 400, { error: body?.msg || "Binance API error " + status });
+        }
+        const balances = (body?.balances || [])
+          .filter(b => parseFloat(b.free) > 0 || parseFloat(b.locked) > 0)
+          .map(b => ({
+            coin:   b.asset,
+            free:   parseFloat(b.free),
+            locked: parseFloat(b.locked),
+            total:  parseFloat(b.free) + parseFloat(b.locked),
+          }));
+        // Estimate USD values using stored prices
+        const totalUSD = 0; // Binance account endpoint doesn't return USD values directly
+        console.log("[CRYPTO] Binance portfolio: " + balances.length + " assets");
+        return json(res, 200, { exchange: "binance", balances, totalUSD, fetchedAt: new Date().toISOString() });
+      }
+
+      // ════════════════════════════════════════════════════════════
+      // COINBASE — accounts list (v2 API, OAuth / API key)
+      // ════════════════════════════════════════════════════════════
+      if (exchange === "coinbase") {
+        const ts        = Math.floor(Date.now() / 1000).toString();
+        const method    = "GET";
+        const path      = "/v2/accounts?limit=100";
+        const body_str  = "";
+        const signInput = ts + method + path + body_str;
+        const signature = hmac256(signInput, secret);
+        const { status, body } = await httpsGet(
+          "api.coinbase.com",
+          path,
+          {
+            "CB-ACCESS-KEY":       apiKey,
+            "CB-ACCESS-SIGN":      signature,
+            "CB-ACCESS-TIMESTAMP": ts,
+            "CB-VERSION":          "2016-02-18",
+            "Content-Type":        "application/json",
+          }
+        );
+        if (status !== 200) {
+          console.warn("[CRYPTO] Coinbase error:", status);
+          return json(res, 400, { error: "Coinbase API error " + status });
+        }
+        const accounts = body?.data || [];
+        const balances = accounts
+          .filter(a => parseFloat(a.balance?.amount || 0) > 0)
+          .map(a => ({
+            coin:     a.currency?.code || a.balance?.currency,
+            free:     parseFloat(a.balance?.amount || 0),
+            locked:   0,
+            total:    parseFloat(a.balance?.amount || 0),
+            usdValue: parseFloat(a.native_balance?.amount || 0),
+          }));
+        const totalUSD = balances.reduce((s, b) => s + b.usdValue, 0);
+        console.log("[CRYPTO] Coinbase portfolio: " + balances.length + " accounts");
+        return json(res, 200, { exchange: "coinbase", balances, totalUSD: +totalUSD.toFixed(2), fetchedAt: new Date().toISOString() });
+      }
+
+      // ════════════════════════════════════════════════════════════
+      // OKX — trading account balance
+      // ════════════════════════════════════════════════════════════
+      if (exchange === "okx") {
+        const ts        = new Date().toISOString();
+        const method    = "GET";
+        const path      = "/api/v5/account/balance";
+        const signInput = ts + method + path + "";
+        const signature = crypto.createHmac("sha256", secret).update(signInput).digest("base64");
+        const passphrase = qs.get("passphrase") || "";
+        const { status, body } = await httpsGet(
+          "www.okx.com",
+          path,
+          {
+            "OK-ACCESS-KEY":        apiKey,
+            "OK-ACCESS-SIGN":       signature,
+            "OK-ACCESS-TIMESTAMP":  ts,
+            "OK-ACCESS-PASSPHRASE": passphrase,
+            "Content-Type":         "application/json",
+          }
+        );
+        if (status !== 200 || body?.code !== "0") {
+          console.warn("[CRYPTO] OKX error:", body?.msg || status);
+          return json(res, 400, { error: body?.msg || "OKX API error " + status });
+        }
+        const details = body?.data?.[0]?.details || [];
+        const balances = details
+          .filter(c => parseFloat(c.eq || 0) > 0)
+          .map(c => ({
+            coin:     c.ccy,
+            free:     parseFloat(c.availEq || c.eq || 0),
+            locked:   parseFloat(c.frozenBal || 0),
+            total:    parseFloat(c.eq || 0),
+            usdValue: parseFloat(c.eqUsd || 0),
+          }));
+        const totalUSD = balances.reduce((s, b) => s + b.usdValue, 0);
+        console.log("[CRYPTO] OKX portfolio: " + balances.length + " currencies");
+        return json(res, 200, { exchange: "okx", balances, totalUSD: +totalUSD.toFixed(2), fetchedAt: new Date().toISOString() });
+      }
+
+      // ════════════════════════════════════════════════════════════
+      // KUCOIN — spot account balances
+      // ════════════════════════════════════════════════════════════
+      if (exchange === "kucoin") {
+        const passphrase = qs.get("passphrase") || "";
+        const ts         = Date.now().toString();
+        const method     = "GET";
+        const endpoint   = "/api/v1/accounts?type=trade";
+        const signInput  = ts + method + endpoint;
+        const signature  = crypto.createHmac("sha256", secret).update(signInput).digest("base64");
+        const ppSign     = crypto.createHmac("sha256", secret).update(passphrase).digest("base64");
+        const { status, body } = await httpsGet(
+          "api.kucoin.com",
+          endpoint,
+          {
+            "KC-API-KEY":        apiKey,
+            "KC-API-SIGN":       signature,
+            "KC-API-TIMESTAMP":  ts,
+            "KC-API-PASSPHRASE": ppSign,
+            "KC-API-KEY-VERSION": "2",
+            "Content-Type":      "application/json",
+          }
+        );
+        if (status !== 200 || body?.code !== "200000") {
+          console.warn("[CRYPTO] KuCoin error:", body?.msg || status);
+          return json(res, 400, { error: body?.msg || "KuCoin API error " + status });
+        }
+        const balances = (body?.data || [])
+          .filter(a => parseFloat(a.available) > 0)
+          .map(a => ({
+            coin:   a.currency,
+            free:   parseFloat(a.available),
+            locked: parseFloat(a.holds),
+            total:  parseFloat(a.balance),
+          }));
+        console.log("[CRYPTO] KuCoin portfolio: " + balances.length + " assets");
+        return json(res, 200, { exchange: "kucoin", balances, totalUSD: 0, fetchedAt: new Date().toISOString() });
+      }
+
+      return json(res, 400, { error: "Unsupported exchange: " + exchange });
+
+    } catch(e) {
+      console.warn("[CRYPTO] Error:", e.message);
       return json(res, 500, { error: e.message });
     }
   }
