@@ -2374,6 +2374,10 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
   const [portfolio, setPortfolio]=useState(null);
   const [portfolioLd, setPortfolioLd]=useState(false);
   const [portfolioErr, setPortfolioErr]=useState(null);
+  const [cryptoTrades, setCryptoTrades]=useState(null);
+  const [cryptoTradesLd, setCryptoTradesLd]=useState(false);
+  const [cryptoTradesErr, setCryptoTradesErr]=useState(null);
+  const [tradeView, setTradeView]=useState("overview"); // overview | history | analysis
 
   const selCoin=CRYPTO_COINS.find(c=>c.id===selected)||CRYPTO_COINS[0];
   const selData=cryptoPrices[selected];
@@ -2405,7 +2409,22 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
     setPortfolioLd(false);
   },[activeExchange,apiKeys]);
 
-  useEffect(()=>{loadPortfolio();},[loadPortfolio]);
+  const loadCryptoTrades=useCallback(async()=>{
+    const keys=apiKeys[activeExchange];
+    if(!keys?.key)return;
+    setCryptoTradesLd(true);setCryptoTradesErr(null);
+    try{
+      let url=SERVER+"/api/crypto-trades?exchange="+activeExchange+"&key="+encodeURIComponent(keys.key)+"&secret="+encodeURIComponent(keys.secret||"");
+      if(keys.passphrase)url+="&passphrase="+encodeURIComponent(keys.passphrase);
+      const r=await fetch(url,{signal:AbortSignal.timeout(15000)});
+      const d=await r.json();
+      if(!r.ok)setCryptoTradesErr(d?.error||"Server error "+r.status);
+      else setCryptoTrades(d);
+    }catch(e){setCryptoTradesErr(e.message);}
+    setCryptoTradesLd(false);
+  },[activeExchange,apiKeys]);
+
+  useEffect(()=>{loadPortfolio();loadCryptoTrades();},[loadPortfolio,loadCryptoTrades]);
 
   const saveApiKey=()=>{
     if(!connectKey.trim())return;
@@ -2677,11 +2696,18 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
           )}
         </div>
 
-        {/* Right: portfolio + market overview */}
+        {/* Right: portfolio + trade analysis */}
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
 
+          {/* Tab switcher */}
+          <div style={{display:"flex",gap:2,background:T.surface,borderRadius:10,padding:3,border:"1px solid "+T.border}}>
+            {[{k:"overview",l:"Portfolio"},{k:"history",l:"Trade History"},{k:"analysis",l:"My Analysis"}].map(t=>(
+              <button key={t.k} onClick={()=>setTradeView(t.k)} style={{flex:1,padding:"5px 0",borderRadius:7,border:"none",cursor:"pointer",fontSize:11,fontWeight:tradeView===t.k?700:400,background:tradeView===t.k?T.blue:"transparent",color:tradeView===t.k?"#fff":T.textSub,transition:"all .15s"}}>{t.l}</button>
+            ))}
+          </div>
+
           {/* Connected exchange + portfolio */}
-          <div className="card" style={{overflow:"hidden"}}>
+          {tradeView==="overview"&&<div className="card" style={{overflow:"hidden"}}>
             <div style={{padding:"12px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
               <div>
                 <div style={{fontSize:12,fontWeight:600}}>Portfolio</div>
@@ -2739,15 +2765,159 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
           </div>
 
 
-          {/* Crypto rules */}
-          <div className="card" style={{padding:"14px 16px",background:"linear-gradient(135deg,rgba(247,147,26,0.05),rgba(98,126,234,0.05))"}}>
+          }
+
+          {/* TRADE HISTORY VIEW */}
+          {tradeView==="history"&&(
+            <div className="card" style={{overflow:"hidden"}}>
+              <div style={{padding:"12px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                <div style={{fontSize:12,fontWeight:600}}>Trade History</div>
+                <div style={{display:"flex",gap:6,alignItems:"center"}}>
+                  {apiKeys[activeExchange]?.key&&<button className="btn" style={{fontSize:10,padding:"3px 8px"}} onClick={loadCryptoTrades}>{cryptoTradesLd?"Loading...":"Refresh"}</button>}
+                </div>
+              </div>
+              <div style={{padding:"12px 14px"}}>
+                {!apiKeys[activeExchange]?.key&&<div style={{textAlign:"center",padding:"20px 0",color:T.textDim,fontSize:12}}>Connect an exchange to see your trade history</div>}
+                {cryptoTradesLd&&<div style={{display:"flex",alignItems:"center",gap:8,color:T.textSub,fontSize:12}}><Spinner size={13}/>Loading trades...</div>}
+                {cryptoTradesErr&&<div style={{fontSize:12,color:T.red}}>{cryptoTradesErr}</div>}
+                {cryptoTrades&&!cryptoTradesLd&&(()=>{
+                  const trades=cryptoTrades.trades||[];
+                  if(!trades.length)return <div style={{fontSize:12,color:T.textDim,textAlign:"center",padding:"20px 0"}}>No closed trades found</div>;
+                  return (
+                    <>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6,marginBottom:12}}>
+                        {[
+                          {l:"Total Trades",v:trades.length,c:T.blue},
+                          {l:"Buy Orders",v:trades.filter(t=>t.side==="buy").length,c:T.green},
+                          {l:"Sell Orders",v:trades.filter(t=>t.side==="sell").length,c:T.red},
+                        ].map(x=><div key={x.l} style={{background:T.bg,borderRadius:8,padding:"8px 10px",textAlign:"center"}}>
+                          <div style={{fontSize:9,color:T.textDim,marginBottom:2,textTransform:"uppercase",letterSpacing:"0.04em"}}>{x.l}</div>
+                          <div style={{fontSize:16,fontWeight:700,color:x.c,fontFamily:"'JetBrains Mono',monospace"}}>{x.v}</div>
+                        </div>)}
+                      </div>
+                      <div style={{overflowY:"auto",maxHeight:340}}>
+                        <table style={{width:"100%",borderCollapse:"collapse"}}>
+                          <thead><tr style={{background:T.bg,position:"sticky",top:0}}>
+                            {["Symbol","Side","Qty","Price","PnL","Time"].map((h,i)=><th key={h} style={{padding:"6px 8px",fontSize:9,color:T.textDim,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.04em",textAlign:i===0?"left":"right"}}>{h}</th>)}
+                          </tr></thead>
+                          <tbody>{trades.slice(0,50).map((t,i)=>{
+                            const hasPnl=t.pnl!==null&&t.pnl!==undefined;
+                            return <tr key={t.id||i} className="trow">
+                              <td style={{padding:"7px 8px",fontSize:11,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{t.symbol}</td>
+                              <td style={{padding:"7px 8px",textAlign:"right"}}><span style={{fontSize:10,fontWeight:700,color:t.side==="buy"?T.green:T.red,background:t.side==="buy"?T.greenBg:T.redBg,padding:"1px 6px",borderRadius:4}}>{(t.side||"").toUpperCase()}</span></td>
+                              <td style={{padding:"7px 8px",textAlign:"right",fontSize:10,fontFamily:"'JetBrains Mono',monospace",color:T.textSub}}>{t.qty?.toFixed(4)}</td>
+                              <td style={{padding:"7px 8px",textAlign:"right",fontSize:10,fontFamily:"'JetBrains Mono',monospace"}}>${t.price?.toLocaleString(undefined,{maximumFractionDigits:4})}</td>
+                              <td style={{padding:"7px 8px",textAlign:"right",fontSize:11,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:hasPnl?(t.pnl>=0?T.green:T.red):T.textDim}}>{hasPnl?(t.pnl>=0?"+":"")+t.pnl.toFixed(2):"—"}</td>
+                              <td style={{padding:"7px 8px",textAlign:"right",fontSize:9,color:T.textDim}}>{t.time?new Date(t.time).toLocaleDateString("en-US",{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"}):""}</td>
+                            </tr>;
+                          })}</tbody>
+                        </table>
+                      </div>
+                    </>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
+          {/* MY ANALYSIS VIEW — derived from trade history */}
+          {tradeView==="analysis"&&(
+            <div style={{display:"flex",flexDirection:"column",gap:10}}>
+              {!apiKeys[activeExchange]?.key?(
+                <div className="card" style={{padding:"24px 16px",textAlign:"center",color:T.textDim,fontSize:12}}>
+                  Connect an exchange to see your personal crypto analysis
+                </div>
+              ):cryptoTradesLd?(
+                <div className="card" style={{padding:20,display:"flex",alignItems:"center",gap:8,color:T.textSub,fontSize:12}}><Spinner size={13}/>Analysing your trades...</div>
+              ):cryptoTradesErr?(
+                <div className="card" style={{padding:16,fontSize:12,color:T.red}}>{cryptoTradesErr}</div>
+              ):cryptoTrades&&(()=>{
+                const trades=cryptoTrades.trades||[];
+                if(!trades.length)return <div className="card" style={{padding:20,fontSize:12,color:T.textDim,textAlign:"center"}}>No trade history to analyse yet</div>;
+                // Symbol breakdown
+                const symMap={};
+                trades.forEach(t=>{
+                  const s=t.symbol||"?";
+                  if(!symMap[s])symMap[s]={symbol:s,trades:0,buys:0,sells:0,volume:0,pnl:0,hasPnl:false};
+                  symMap[s].trades++;
+                  if(t.side==="buy")symMap[s].buys++;else symMap[s].sells++;
+                  symMap[s].volume+=t.total||0;
+                  if(t.pnl!==null&&t.pnl!==undefined){symMap[s].pnl+=t.pnl;symMap[s].hasPnl=true;}
+                });
+                const syms=Object.values(symMap).sort((a,b)=>b.trades-a.trades);
+                const totalVol=trades.reduce((s,t)=>s+(t.total||0),0);
+                const totalPnl=trades.filter(t=>t.pnl!==null).reduce((s,t)=>s+(t.pnl||0),0);
+                const hasPnlData=trades.some(t=>t.pnl!==null);
+                // Most active day
+                const dayMap={};
+                trades.forEach(t=>{if(!t.time)return;const d=new Date(t.time).toLocaleDateString("en-US",{weekday:"short"});dayMap[d]=(dayMap[d]||0)+1;});
+                const topDay=Object.entries(dayMap).sort((a,b)=>b[1]-a[1])[0];
+                // Most active hour
+                const hrMap={};
+                trades.forEach(t=>{if(!t.time)return;const h=new Date(t.time).getHours();hrMap[h]=(hrMap[h]||0)+1;});
+                const topHour=Object.entries(hrMap).sort((a,b)=>b[1]-a[1])[0];
+                return (
+                  <>
+                    {/* Summary KPIs */}
+                    <div className="card" style={{overflow:"hidden"}}>
+                      <div style={{padding:"11px 14px",borderBottom:"1px solid "+T.border,fontSize:12,fontWeight:600}}>Your Crypto Analysis</div>
+                      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:0}}>
+                        {[
+                          {l:"Total Trades",v:trades.length,c:T.blue},
+                          {l:"Total Volume",v:"$"+(totalVol>1e6?(totalVol/1e6).toFixed(1)+"M":totalVol.toFixed(0)),c:T.text},
+                          hasPnlData&&{l:"Realised PnL",v:(totalPnl>=0?"+":"")+totalPnl.toFixed(2),c:totalPnl>=0?T.green:T.red},
+                          {l:"Most Traded",v:syms[0]?.symbol||"—",c:T.amber},
+                          topDay&&{l:"Most Active Day",v:topDay[0]+" ("+topDay[1]+"t)",c:T.purple},
+                          topHour&&{l:"Most Active Hour",v:topHour[0]+":00 UTC",c:T.cyan},
+                        ].filter(Boolean).map((x,i,arr)=>(
+                          <div key={x.l} style={{padding:"12px 14px",borderBottom:i<arr.length-2?"1px solid "+T.border:"none",borderRight:i%2===0?"1px solid "+T.border:"none"}}>
+                            <div style={{fontSize:9,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4}}>{x.l}</div>
+                            <div style={{fontSize:15,fontWeight:700,color:x.c,fontFamily:"'JetBrains Mono',monospace"}}>{x.v}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {/* Per-symbol breakdown */}
+                    <div className="card" style={{overflow:"hidden"}}>
+                      <div style={{padding:"11px 14px",borderBottom:"1px solid "+T.border,fontSize:12,fontWeight:600}}>Per Coin Breakdown</div>
+                      {syms.slice(0,8).map((s,i)=>{
+                        const coin=CRYPTO_COINS.find(c=>c.id===s.symbol||s.symbol.startsWith(c.id));
+                        const barW=Math.round(s.trades/syms[0].trades*100);
+                        return (
+                          <div key={s.symbol} className="trow" style={{padding:"9px 14px"}}>
+                            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                              <div style={{display:"flex",alignItems:"center",gap:7}}>
+                                <div style={{width:22,height:22,borderRadius:6,background:coin?.bg||T.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,fontWeight:800,color:coin?.color||T.textDim}}>{s.symbol.slice(0,3)}</div>
+                                <span style={{fontSize:12,fontWeight:700}}>{s.symbol}</span>
+                                <span style={{fontSize:10,color:T.textDim}}>{s.trades} trades</span>
+                              </div>
+                              <div style={{textAlign:"right"}}>
+                                {s.hasPnl&&<div style={{fontSize:12,fontWeight:700,color:s.pnl>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{s.pnl>=0?"+":""}{s.pnl.toFixed(2)}</div>}
+                                <div style={{fontSize:10,color:T.textDim}}>${s.volume.toFixed(0)} vol</div>
+                              </div>
+                            </div>
+                            <div style={{height:3,background:T.bg,borderRadius:2}}>
+                              <div style={{height:"100%",width:barW+"%",background:coin?.color||T.blue,borderRadius:2,transition:"width .5s"}}/>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                );
+              })()}
+            </div>
+          )}
+
+          {/* Crypto rules — only in overview */}
+          {tradeView==="overview"&&<div className="card" style={{padding:"14px 16px",background:"linear-gradient(135deg,rgba(247,147,26,0.05),rgba(98,126,234,0.05))"}}>
             <div style={{fontSize:11,fontWeight:700,color:T.textSub,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10}}>Crypto Risk Rules</div>
             {["BTC leads — always check BTC direction first","Size down: crypto is 5–10x more volatile than forex","Never risk more than 1-2% per crypto trade","Funding rates matter — check before holding overnight","News & Twitter move crypto 40%+ in minutes"].map((tip,i)=>(
               <div key={i} style={{display:"flex",gap:7,marginBottom:i<4?6:0,fontSize:11,color:T.textSub,lineHeight:1.5}}>
                 <span style={{color:T.amber,fontWeight:700,flexShrink:0}}>{i+1}.</span><span>{tip}</span>
               </div>
             ))}
-          </div>
+          </div>}
         </div>
       </div>
     </div>
