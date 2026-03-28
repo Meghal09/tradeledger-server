@@ -2140,8 +2140,7 @@ function JournalTab({trades}){
             const ranked=Object.values(emotionMap).map(e=>({...e,avg:+(e.pnl/e.count).toFixed(2)})).sort((a,b)=>b.avg-a.avg);
             if(ranked.length<2)return null;
             const best=ranked[0],worst=ranked[ranked.length-1];
-            return <div title={"Best emotion: "+best.emotion+" ($"+best.avg+"/trade)
-Worst: "+worst.emotion+" ($"+worst.avg+"/trade)"} style={{fontSize:11,color:T.textSub,background:T.bg,border:"1px solid "+T.border,borderRadius:7,padding:"4px 10px",cursor:"default",display:"flex",alignItems:"center",gap:5}}>
+            return <div title={"Best: "+best.emotion+" ($"+best.avg+"/trade) | Worst: "+worst.emotion+" ($"+worst.avg+"/trade)"} style={{fontSize:11,color:T.textSub,background:T.bg,border:"1px solid "+T.border,borderRadius:7,padding:"4px 10px",cursor:"default",display:"flex",alignItems:"center",gap:5}}>
               <span style={{color:T.green}}>↑</span><strong style={{color:T.green}}>{best.emotion}</strong>
               <span style={{color:T.textDim}}>vs</span>
               <strong style={{color:T.red}}>{worst.emotion}</strong><span style={{color:T.red}}>↓</span>
