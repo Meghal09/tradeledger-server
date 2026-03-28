@@ -1473,8 +1473,13 @@ function CalendarTab({trades,todayNews}){
           {todayNews.length>0&&(()=>{
             const grouped={high:todayNews.filter(e=>(e.impact||"").toLowerCase()==="high"),medium:todayNews.filter(e=>(e.impact||"").toLowerCase()==="medium"),low:todayNews.filter(e=>!["high","medium"].includes((e.impact||"").toLowerCase()))};
             const fmtTime=e=>{const d=e.date||e.time;if(!d)return"";try{const t=new Date(d);return isNaN(t)?"":" · "+t.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}catch{return"";}};
-            const EventRow=({e,imp})=>(
-              <div className="trow" style={{padding:"10px 14px",display:"grid",gridTemplateColumns:"1fr auto",gap:12,alignItems:"start"}}>
+            const rowBg=imp=>imp==="high"?T.redBg:imp==="medium"?T.amberBg:T.bg;
+            const rowBorder=imp=>imp==="high"?T.redBorder:imp==="medium"?"rgba(245,158,11,.2)":T.border;
+            const rowColor=imp=>imp==="high"?T.red:imp==="medium"?T.amber:T.textDim;
+            const badgeColor=imp=>imp==="high"?"red":imp==="medium"?"amber":"gray";
+            const badgeLabel=imp=>imp==="high"?"HIGH":imp==="medium"?"MED":"LOW";
+            const renderRow=(e,imp,i)=>(
+              <div key={i} className="trow" style={{padding:"10px 14px",display:"grid",gridTemplateColumns:"1fr auto",gap:12,alignItems:"start"}}>
                 <div>
                   <div style={{fontSize:12,fontWeight:imp==="high"?600:500,color:imp==="high"?T.text:T.textSub,lineHeight:1.45,marginBottom:3}}>{e.title||e.event||e.name||"Unnamed Event"}</div>
                   <div style={{display:"flex",gap:8,alignItems:"center",flexWrap:"wrap"}}>
@@ -1489,7 +1494,7 @@ function CalendarTab({trades,todayNews}){
                     </div>
                   )}
                 </div>
-                <Badge color={imp==="high"?"red":imp==="medium"?"amber":"gray"}>{imp==="high"?"HIGH":imp==="medium"?"MED":"LOW"}</Badge>
+                <Badge color={badgeColor(imp)}>{badgeLabel(imp)}</Badge>
               </div>
             );
             return (
@@ -1507,21 +1512,21 @@ function CalendarTab({trades,todayNews}){
                     <div style={{width:7,height:7,borderRadius:"50%",background:T.red,boxShadow:"0 0 6px "+T.red}}/>
                     <span style={{fontSize:10,fontWeight:700,color:T.red,textTransform:"uppercase",letterSpacing:"0.06em"}}>High Impact — {grouped.high.length} event{grouped.high.length>1?"s":""}</span>
                   </div>
-                  {grouped.high.map((e,i)=><EventRow key={i} e={e} imp="high"/>)}
+                  {grouped.high.map((e,i)=>renderRow(e,"high",i))}
                 </>}
                 {grouped.medium.length>0&&<>
                   <div style={{padding:"6px 14px",background:T.amberBg,borderBottom:"1px solid rgba(245,158,11,.2)",display:"flex",alignItems:"center",gap:6}}>
                     <div style={{width:7,height:7,borderRadius:"50%",background:T.amber}}/>
                     <span style={{fontSize:10,fontWeight:700,color:T.amber,textTransform:"uppercase",letterSpacing:"0.06em"}}>Medium Impact — {grouped.medium.length} event{grouped.medium.length>1?"s":""}</span>
                   </div>
-                  {grouped.medium.map((e,i)=><EventRow key={i} e={e} imp="medium"/>)}
+                  {grouped.medium.map((e,i)=>renderRow(e,"medium",i))}
                 </>}
                 {grouped.low.length>0&&<>
                   <div style={{padding:"6px 14px",background:T.bg,borderBottom:"1px solid "+T.border,display:"flex",alignItems:"center",gap:6}}>
                     <div style={{width:7,height:7,borderRadius:"50%",background:T.textDim}}/>
                     <span style={{fontSize:10,fontWeight:700,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.06em"}}>Low Impact — {grouped.low.length} event{grouped.low.length>1?"s":""}</span>
                   </div>
-                  {grouped.low.map((e,i)=><EventRow key={i} e={e} imp="low"/>)}
+                  {grouped.low.map((e,i)=>renderRow(e,"low",i))}
                 </>}
               </div>
             );
