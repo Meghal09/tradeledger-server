@@ -652,7 +652,15 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
   return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:8}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}><h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Watchlist</h1><span style={{fontSize:10,fontWeight:600,color:T.textDim,background:T.bg,border:"1px solid "+T.border,borderRadius:6,padding:"2px 8px",letterSpacing:"0.04em"}}>LIVE PRICES</span></div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Watchlist</h1>
+          {(()=>{
+            const alertCount=JSON.parse(localStorage.getItem("tl_price_alerts")||"[]").filter(a=>!a.triggered).length;
+            return <span title="Price alerts active" style={{fontSize:11,fontWeight:700,color:alertCount>0?T.amber:T.textDim,background:alertCount>0?T.amberBg:T.bg,border:"1px solid "+(alertCount>0?"rgba(245,158,11,.3)":T.border),borderRadius:6,padding:"3px 10px",cursor:"default",display:"flex",alignItems:"center",gap:5,letterSpacing:"0.03em"}}>
+              <span style={{fontSize:9,opacity:.7}}>ALERTS</span>{alertCount>0?alertCount+" active":"none"}
+            </span>;
+          })()}
+        </div>
         <div style={{display:"flex",gap:8}}>
           <button className="btn" onClick={()=>setSizerOpen(p=>!p)}>Position Sizer</button>
           <button className="btn btn-primary" onClick={()=>setPickerOpen(p=>!p)}>+ Add Symbol</button>
@@ -2381,9 +2389,23 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
 
       {/* Header */}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-        <div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
           <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Crypto</h1>
-          
+          {cryptoPrices["BTC"]&&(()=>{
+            const btc=cryptoPrices["BTC"],eth=cryptoPrices["ETH"],sol=cryptoPrices["SOL"];
+            const btcChg=btc?.chg||0,ethChg=eth?.chg||0,solChg=sol?.chg||0;
+            const altsSurging=ethChg>btcChg+2||solChg>btcChg+2;
+            const altsWeak=ethChg<btcChg-2||solChg<btcChg-2;
+            const altsFollowing=Math.abs(ethChg-btcChg)<1.5&&Math.abs(solChg-btcChg)<2;
+            const label=altsWeak?"BTC Season":altsSurging?"Alt Season":altsFollowing?"Correlated":"Diverging";
+            const color=altsSurging?T.purple:altsWeak?T.amber:altsFollowing?T.blue:T.textDim;
+            const bg=altsSurging?T.purpleBg:altsWeak?T.amberBg:altsFollowing?T.blueBg:T.bg;
+            const border=altsSurging?"rgba(139,92,246,.3)":altsWeak?"rgba(245,158,11,.3)":altsFollowing?"rgba(79,128,255,.3)":T.border;
+            return <span title={altsWeak?"Alts lagging BTC — trade BTC/ETH only":altsSurging?"Alts outperforming — alt setups valid":altsFollowing?"BTC dictates direction — follow BTC trend":"Mixed signals — wait for clarity"}
+              style={{fontSize:11,fontWeight:700,color,background:bg,border:"1px solid "+border,borderRadius:6,padding:"3px 10px",cursor:"default",display:"flex",alignItems:"center",gap:5,letterSpacing:"0.03em"}}>
+              <span style={{fontSize:9,opacity:.7}}>REGIME</span>{label}
+            </span>;
+          })()}
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           {/* Fear & Greed */}
@@ -2685,32 +2707,6 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
             </div>
           </div>
 
-          {/* BTC Dominance Pulse */}
-          {cryptoPrices["BTC"]&&(()=>{
-            const btc=cryptoPrices["BTC"],eth=cryptoPrices["ETH"],sol=cryptoPrices["SOL"];
-            const btcChg=btc.chg||0,ethChg=eth?.chg||0,solChg=sol?.chg||0;
-            const altsFollowing=Math.abs(ethChg-btcChg)<1.5&&Math.abs(solChg-btcChg)<2;
-            const altsSurging=ethChg>btcChg+2||solChg>btcChg+2;
-            const altsWeak=ethChg<btcChg-2||solChg<btcChg-2;
-            const regime=altsWeak?"BTC Season — alts lagging":altsSurging?"Alt Season — alts outperforming BTC":altsFollowing?"Correlated — alts following BTC":"Diverging — mixed signals";
-            const regimeColor=altsSurging?T.purple:altsWeak?T.amber:altsFollowing?T.blue:T.textSub;
-            const advice=altsWeak?"Stick to BTC/ETH only when alts underperform":altsSurging?"Momentum in alts — SOL, BNB setups valid":altsFollowing?"BTC direction dictates all alts right now":"Wait for clearer signal before entering alts";
-            return (
-              <div className="card" style={{padding:"14px 16px",marginBottom:12}}>
-                <div style={{fontSize:10,fontWeight:700,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.06em",marginBottom:10}}>Market Regime</div>
-                <div style={{fontSize:14,fontWeight:700,color:regimeColor,marginBottom:5}}>{regime}</div>
-                <div style={{fontSize:11,color:T.textSub,lineHeight:1.6,marginBottom:10}}>{advice}</div>
-                <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:6}}>
-                  {[{l:"BTC",v:btcChg},{l:"ETH",v:ethChg},{l:"SOL",v:solChg}].map(x=>(
-                    <div key={x.l} style={{background:T.bg,borderRadius:7,padding:"6px 8px",textAlign:"center"}}>
-                      <div style={{fontSize:9,color:T.textDim,marginBottom:2}}>{x.l}</div>
-                      <div style={{fontSize:12,fontWeight:700,color:x.v>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{x.v>=0?"+":""}{x.v.toFixed(2)}%</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })()}
 
           {/* Crypto rules */}
           <div className="card" style={{padding:"14px 16px",background:"linear-gradient(135deg,rgba(247,147,26,0.05),rgba(98,126,234,0.05))"}}>
