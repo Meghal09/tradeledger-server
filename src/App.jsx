@@ -790,6 +790,7 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
               );
             })}
             {watchlist.length===0&&<div style={{padding:32,textAlign:"center",color:T.textDim,fontSize:12}}>Add symbols to track live prices</div>}
+            {watchlist.length>0&&<div style={{padding:"6px 14px",borderTop:"1px solid "+T.border,fontSize:9,color:T.textDim,textAlign:"center",letterSpacing:"0.03em"}}>Press D·W·A·X·J·C·N·S to switch tabs</div>}
           </div>
         </div>
 
@@ -2129,6 +2130,23 @@ function JournalTab({trades}){
         <div style={{display:"flex",gap:8}}>
           {entries.length>=3&&<button className="btn" onClick={genCoaching} disabled={coachingLd}>{coachingLd?"Analysing...":"AI Coaching"}</button>}
           {coaching&&<button className="btn" onClick={()=>setView("coaching")}>View Coaching</button>}
+          {entries.length>=5&&(()=>{
+            const emotionMap={};
+            entries.filter(e=>e.emotion).forEach(e=>{
+              if(!emotionMap[e.emotion])emotionMap[e.emotion]={emotion:e.emotion,pnl:0,count:0};
+              emotionMap[e.emotion].pnl+=(e.pnl||0);
+              emotionMap[e.emotion].count++;
+            });
+            const ranked=Object.values(emotionMap).map(e=>({...e,avg:+(e.pnl/e.count).toFixed(2)})).sort((a,b)=>b.avg-a.avg);
+            if(ranked.length<2)return null;
+            const best=ranked[0],worst=ranked[ranked.length-1];
+            return <div title={"Best emotion: "+best.emotion+" ($"+best.avg+"/trade)
+Worst: "+worst.emotion+" ($"+worst.avg+"/trade)"} style={{fontSize:11,color:T.textSub,background:T.bg,border:"1px solid "+T.border,borderRadius:7,padding:"4px 10px",cursor:"default",display:"flex",alignItems:"center",gap:5}}>
+              <span style={{color:T.green}}>↑</span><strong style={{color:T.green}}>{best.emotion}</strong>
+              <span style={{color:T.textDim}}>vs</span>
+              <strong style={{color:T.red}}>{worst.emotion}</strong><span style={{color:T.red}}>↓</span>
+            </div>;
+          })()}
           {trades.length>0&&<button className="btn" style={{fontSize:11}} onClick={()=>{const t=[...trades].reverse()[0];setForm(f=>({...f,symbol:t.symbol||"",type:t.type||"buy",pnl:((t.profit||0)+(t.swap||0)+(t.commission||0)).toFixed(2),outcome:(t.profit||0)>0?"win":(t.profit||0)<0?"loss":"breakeven",date:mt5Day(t.closeTime)||new Date().toISOString().slice(0,10)}));setView("new");}}>Import MT5</button>}
           <button className="btn btn-primary" onClick={()=>setView("new")}>+ New Entry</button>
         </div>
@@ -2180,6 +2198,41 @@ function JournalTab({trades}){
                 <div style={{fontSize:9,color:T.textSub,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.04em",marginBottom:4,marginTop:2}}>{x.l}</div>
                 <div style={{fontSize:18,fontWeight:700,color:x.c,fontFamily:"'JetBrains Mono',monospace"}}>{x.v}</div>
                 <div style={{fontSize:10,color:T.textDim,marginTop:2}}>{x.sub}</div>
+              </div>
+            ))}
+          </div>
+        );
+      })()}
+
+      {/* Emotion → P&L breakdown */}
+      {entries.length>=5&&(()=>{
+        const emotionMap={};
+        entries.filter(e=>e.emotion).forEach(e=>{
+          if(!emotionMap[e.emotion])emotionMap[e.emotion]={emotion:e.emotion,pnl:0,count:0,wins:0};
+          emotionMap[e.emotion].pnl+=(e.pnl||0);
+          emotionMap[e.emotion].count++;
+          if((e.pnl||0)>0)emotionMap[e.emotion].wins++;
+        });
+        const data=Object.values(emotionMap).map(e=>({...e,avg:+(e.pnl/e.count).toFixed(2),wr:Math.round(e.wins/e.count*100)})).sort((a,b)=>b.avg-a.avg);
+        if(data.length<2)return null;
+        const maxAbs=Math.max(...data.map(d=>Math.abs(d.avg)),0.01);
+        return (
+          <div className="card" style={{padding:"14px 16px",marginBottom:12}}>
+            <div style={{fontSize:12,fontWeight:600,marginBottom:3}}>Emotion → P&L Impact</div>
+            <div style={{fontSize:11,color:T.textSub,marginBottom:12}}>How your emotional state affects your results</div>
+            {data.map(d=>(
+              <div key={d.emotion} style={{marginBottom:8}}>
+                <div style={{display:"flex",justifyContent:"space-between",marginBottom:3}}>
+                  <span style={{fontSize:11,fontWeight:600,color:T.text}}>{d.emotion}</span>
+                  <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                    <span style={{fontSize:10,color:T.textDim}}>{d.count} trades · {d.wr}% WR</span>
+                    <span style={{fontSize:12,fontWeight:700,color:d.avg>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{d.avg>=0?"+":""}{d.avg}/trade</span>
+                  </div>
+                </div>
+                <div style={{height:5,background:T.bg,borderRadius:3,position:"relative"}}>
+                  <div style={{position:"absolute",left:d.avg<0?(100-Math.abs(d.avg)/maxAbs*50)+"%":"50%",width:(Math.abs(d.avg)/maxAbs*50)+"%",height:"100%",background:d.avg>=0?T.green:T.red,borderRadius:3,transition:"width .5s"}}/>
+                  <div style={{position:"absolute",left:"50%",top:0,bottom:0,width:1,background:T.border}}/>
+                </div>
               </div>
             ))}
           </div>
@@ -3167,6 +3220,19 @@ export default function TradeLedger(){
   useEffect(()=>{const t=setInterval(fetchAll,30000);return()=>clearInterval(t);},[fetchAll]);
   useEffect(()=>{if(serverOk)connectWS();return()=>{wsRef.current?.close();clearTimeout(reconnRef.current);};},[serverOk,connectWS]);
 
+  // Keyboard shortcuts
+  useEffect(()=>{
+    const map={d:"dashboard",w:"watchlist",a:"analytics",j:"journal",c:"calendar",n:"news",s:"setup",x:"crypto"};
+    const handler=e=>{
+      if(e.target.tagName==="INPUT"||e.target.tagName==="TEXTAREA"||e.target.tagName==="SELECT")return;
+      if(e.metaKey||e.ctrlKey||e.altKey)return;
+      const tab=map[e.key.toLowerCase()];
+      if(tab)setTab(tab);
+    };
+    window.addEventListener("keydown",handler);
+    return()=>window.removeEventListener("keydown",handler);
+  },[]);
+
   // Prices
   useEffect(()=>{
     if(!watchlist.length)return;
@@ -3300,7 +3366,25 @@ export default function TradeLedger(){
         <div style={{width:200,background:"#fff",borderRight:`1px solid ${T.border}`,display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden",boxShadow:"1px 0 6px rgba(0,0,0,0.04)"}}>
           <div style={{padding:"14px 12px",borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
             <div style={{width:32,height:32,borderRadius:10,background:`linear-gradient(135deg,${T.blue},#6d9bff)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800,color:"#fff",flexShrink:0}}>TL</div>
-            <div><div style={{fontSize:14,fontWeight:700,color:T.text,whiteSpace:"nowrap"}}>TradeLedger</div><div style={{fontSize:10,color:T.textDim,whiteSpace:"nowrap"}}>MT5 Journal</div></div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:14,fontWeight:700,color:T.text,whiteSpace:"nowrap"}}>TradeLedger</div>
+              <div style={{fontSize:10,color:T.textDim,whiteSpace:"nowrap"}}>MT5 Journal</div>
+            </div>
+            {(()=>{
+              if(!trades.length)return null;
+              let streak=0,type=null;
+              const rev=[...trades].reverse();
+              const first=rev[0];if(!first)return null;
+              type=first.profit>0?"W":"L";
+              for(const t of rev){if((t.profit>0&&type==="W")||(t.profit<=0&&type==="L"))streak++;else break;}
+              if(streak<2)return null;
+              const isWin=type==="W";
+              const emoji=isWin?(streak>=5?"fire":streak>=3?"⚡":"✓"):(streak>=5?"ice":streak>=3?"❄":"✗");
+              return <div title={(isWin?"Win":"Loss")+" streak: "+streak+" trades"} style={{flexShrink:0,background:isWin?"rgba(0,196,140,.15)":"rgba(255,91,91,.15)",border:"1px solid "+(isWin?T.greenBorder:T.redBorder),borderRadius:7,padding:"2px 6px",display:"flex",alignItems:"center",gap:3,animation:streak>=5?"pulse 1.5s infinite":"none"}}>
+                <span style={{fontSize:11}}>{emoji}</span>
+                <span style={{fontSize:10,fontWeight:800,color:isWin?T.green:T.red}}>{streak}</span>
+              </div>;
+            })()}
           </div>
           <nav style={{padding:"8px 6px",flex:1}}>
             {NAV.map(n=>{
@@ -3355,6 +3439,18 @@ export default function TradeLedger(){
               {todayNews.length>0&&<button className="btn" style={{fontSize:11,padding:"4px 10px"}} onClick={()=>setNewsImpactOpen(o=>!o)}>{todayNews.filter(e=>(e.impact||"").toLowerCase()==="high").length>0&&<span style={{color:T.red}}>● </span>}Events</button>}
               <button className="btn" style={{fontSize:11,padding:"4px 10px"}} onClick={()=>setChecklistOpen(true)}>Checklist</button>
               {trades.length>0&&<span style={{fontSize:11,color:T.textDim,fontFamily:"'JetBrains Mono',monospace",background:T.bg,padding:"2px 7px",borderRadius:5}}>{trades.length}t</span>}
+              {(()=>{
+                const [now,setNow]=useState(new Date());
+                useEffect(()=>{const t=setInterval(()=>setNow(new Date()),1000);return()=>clearInterval(t);},[]);
+                const utc=now.toUTCString().slice(17,22);
+                const session=(()=>{const h=now.getUTCHours();return h>=8&&h<13?"London":h>=13&&h<17?"Overlap":h>=17&&h<22?"New York":h>=0&&h<9?"Tokyo":"Sydney";})();
+                const sessionColor=(()=>{const h=now.getUTCHours();return h>=8&&h<17?T.green:h>=17&&h<22?T.purple:T.cyan;})();
+                return <div style={{fontSize:11,fontFamily:"'JetBrains Mono',monospace",color:T.textSub,display:"flex",alignItems:"center",gap:6,background:T.bg,border:"1px solid "+T.border,borderRadius:8,padding:"4px 10px"}}>
+                  <div style={{width:5,height:5,borderRadius:"50%",background:sessionColor,animation:"pulse 2s infinite"}}/>
+                  <span style={{color:sessionColor,fontWeight:600,fontSize:10}}>{session}</span>
+                  <span>{utc} UTC</span>
+                </div>;
+              })()}
               <button onClick={toggleDark} title={dark?"Light mode":"Dark mode"} style={{background:dark?"rgba(255,255,255,0.1)":T.bg,border:"1px solid "+T.border,borderRadius:8,padding:"4px 10px",cursor:"pointer",fontSize:13,color:T.textSub,display:"flex",alignItems:"center",gap:5,transition:"all .2s"}}>{dark?"Light":"Dark"}</button>
             </div>
           </div>
