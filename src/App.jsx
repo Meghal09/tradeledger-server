@@ -216,11 +216,23 @@ function DashboardTab({trades,stats,serverOk,lastSync}){
   return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:20}}>
 
-      {/* HEADER */}
-      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+      {/* HEADER with inline DNA badge */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:12}}>
         <div>
-          <h1 style={{fontSize:22,fontWeight:700,letterSpacing:"-0.5px"}}>Dashboard</h1>
-          <div style={{fontSize:12,color:T.textSub,marginTop:2}}>Welcome back — {new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"})}</div>
+          <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:3}}>
+            <h1 style={{fontSize:22,fontWeight:700,letterSpacing:"-0.5px"}}>Dashboard</h1>
+            {fStats&&(()=>{
+              const rr=parseFloat(fStats.rr)||0;
+              const dnaLabel=fStats.winRate>=60&&rr<1.2?"Sniper":fStats.winRate<45&&rr>=1.5?"Swing Hunter":fStats.winRate>=55&&rr>=1.3?"Balanced":fStats.maxDD>15?"Risk-Taker":fStats.tradesPerDay>6?"Overtrader":"Developing";
+              const dnaColor=fStats.totalProfit>=0?T.blue:T.amber;
+              const dnaBg=fStats.totalProfit>=0?T.blueBg:T.amberBg;
+              const dnaBorder=fStats.totalProfit>=0?"rgba(79,128,255,.3)":"rgba(245,158,11,.3)";
+              return <span title="Your trader personality type — derived from your stats" style={{fontSize:11,fontWeight:700,color:dnaColor,background:dnaBg,border:"1px solid "+dnaBorder,borderRadius:6,padding:"3px 10px",cursor:"default",letterSpacing:"0.03em",display:"flex",alignItems:"center",gap:5}}>
+                <span style={{fontSize:9,opacity:.7}}>DNA</span>{dnaLabel}
+              </span>;
+            })()}
+          </div>
+          <div style={{fontSize:12,color:T.textSub}}>Welcome back — {new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"})}</div>
         </div>
         <div style={{display:"flex",alignItems:"center",gap:6,background:serverOk?T.greenBg:T.redBg,border:"1px solid "+(serverOk?T.greenBorder:T.redBorder),borderRadius:20,padding:"3px 12px",fontSize:11,fontWeight:600,color:serverOk?T.green:T.red}}>
           <div style={{width:5,height:5,borderRadius:"50%",background:serverOk?T.green:T.red,animation:serverOk?"none":"pulse 1.5s infinite"}}/>
@@ -419,32 +431,6 @@ function DashboardTab({trades,stats,serverOk,lastSync}){
           </div>
         </div>
       </div>
-
-      {/* TRADING DNA */}
-      {fStats&&(()=>{
-        const rr=parseFloat(fStats.rr)||0;
-        const style=fStats.winRate>=60&&rr<1.2?"Sniper — high accuracy, small wins. Focus on R:R, not more trades.":fStats.winRate<45&&rr>=1.5?"Swing Hunter — few wins but big when right. Stay patient, let winners run.":fStats.winRate>=55&&rr>=1.3?"Balanced Trader — solid foundation. Scale up 10% and tighten your worst symbol.":fStats.maxDD>15?"Risk-Taker — your edge is real but drawdowns threaten it. Cut size on losing days.":fStats.tradesPerDay>6?"Overtrader — too many trades dilutes your edge. Pick your 3 best setups only.":"Developing Trader — patterns forming. Journal every trade this week to find your real edge.";
-        const strengths=[];const warnings=[];
-        if(fStats.winRate>=55)strengths.push("strong win rate");if(rr>=1.5)strengths.push("excellent R:R");if(fStats.pf>=1.8)strengths.push("high profit factor");if(fStats.maxCW>=5)strengths.push("proven winning streaks");
-        if(fStats.maxDD>15)warnings.push("drawdown risk");if(fStats.maxCL>=4)warnings.push("loss streaks");if(fStats.tradesPerDay>7)warnings.push("overtrading");if(rr<1)warnings.push("poor risk-reward");
-        const dnaColor=fStats.totalProfit>=0?T.blue:T.amber;
-        return (
-          <div className="card" style={{padding:"16px 20px",marginBottom:12,background:"linear-gradient(135deg,"+dnaColor+"08,"+dnaColor+"04)",border:"1px solid "+dnaColor+"25",position:"relative",overflow:"hidden"}}>
-            <div style={{position:"absolute",right:-20,top:-20,width:100,height:100,borderRadius:"50%",background:dnaColor+"10",pointerEvents:"none"}}/>
-            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",gap:20}}>
-              <div style={{flex:1}}>
-                <div style={{fontSize:10,color:dnaColor,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.07em",marginBottom:6}}>Your Trading DNA — {period==="all"?"All Time":period}</div>
-                <div style={{fontSize:14,fontWeight:700,color:T.text,marginBottom:6}}>{style.split("—")[0].trim()}</div>
-                <div style={{fontSize:12,color:T.textSub,lineHeight:1.7}}>{style.split("—").slice(1).join("—").trim()}</div>
-              </div>
-              <div style={{display:"flex",flexDirection:"column",gap:6,flexShrink:0}}>
-                {strengths.slice(0,2).map(s=><div key={s} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:T.green,background:T.greenBg,border:"1px solid "+T.greenBorder,borderRadius:5,padding:"2px 8px",whiteSpace:"nowrap"}}><span>+</span>{s}</div>)}
-                {warnings.slice(0,2).map(w=><div key={w} style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:T.amber,background:T.amberBg,border:"1px solid rgba(245,158,11,.25)",borderRadius:5,padding:"2px 8px",whiteSpace:"nowrap"}}><span>!</span>{w}</div>)}
-              </div>
-            </div>
-          </div>
-        );
-      })()}
 
       {/* ROW 3: Calendar heatmap + Recent Trades */}
       <div style={{display:"grid",gridTemplateColumns:"1fr 380px",gap:12}}>
@@ -666,7 +652,7 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
   return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:8}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-        <div><h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Watchlist</h1><p style={{fontSize:12,color:T.textSub,marginTop:1}}>Live prices + position sizer + signal scanner</p></div>
+        <div style={{display:"flex",alignItems:"center",gap:10}}><h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Watchlist</h1><span style={{fontSize:10,fontWeight:600,color:T.textDim,background:T.bg,border:"1px solid "+T.border,borderRadius:6,padding:"2px 8px",letterSpacing:"0.04em"}}>LIVE PRICES</span></div>
         <div style={{display:"flex",gap:8}}>
           <button className="btn" onClick={()=>setSizerOpen(p=>!p)}>Position Sizer</button>
           <button className="btn btn-primary" onClick={()=>setPickerOpen(p=>!p)}>+ Add Symbol</button>
@@ -2397,7 +2383,7 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
         <div>
           <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Crypto</h1>
-          <p style={{fontSize:12,color:T.textSub,marginTop:1}}>Live prices · portfolio · signals — no MT5 needed</p>
+          
         </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           {/* Fear & Greed */}
@@ -2667,30 +2653,35 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
             </div>
           </div>
 
-          {/* Live market mini-table */}
+          {/* Coin Analysis summary */}
           <div className="card" style={{overflow:"hidden"}}>
             <div style={{padding:"11px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontSize:12,fontWeight:600}}>Live Prices</span>
+              <span style={{fontSize:12,fontWeight:600}}>Market Snapshot</span>
               <div style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:T.textDim}}>
                 <div style={{width:5,height:5,borderRadius:"50%",background:T.green,animation:"pulse 2s infinite"}}/>
-                {EXCHANGES.find(e=>e.id===activeExchange)?.name}
+                <span>Live</span>
               </div>
             </div>
-            {CRYPTO_COINS.map(coin=>{
+            {CRYPTO_COINS.slice(0,6).map(coin=>{
               const d=cryptoPrices[coin.id];
               const chg=d?.chg||0;
+              const sig=chg>1.5?"BUY":chg<-1.5?"SELL":"HOLD";
+              const sigColor=sig==="BUY"?T.green:sig==="SELL"?T.red:T.textDim;
               return (
                 <div key={coin.id} className="trow" onClick={()=>setSelected(coin.id)}
-                  style={{padding:"9px 14px",display:"grid",gridTemplateColumns:"30px 1fr 80px 60px",gap:8,alignItems:"center",cursor:"pointer",background:selected===coin.id?coin.bg+"80":"transparent"}}>
-                  <div style={{width:26,height:26,borderRadius:7,background:coin.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:9,fontWeight:800,color:coin.color}}>{coin.id.slice(0,3)}</div>
-                  <div style={{fontSize:11,fontWeight:600,color:selected===coin.id?coin.color:T.text}}>{coin.id}<span style={{fontSize:9,color:T.textDim,marginLeft:4}}>{coin.name}</span></div>
-                  {d?<span style={{fontSize:11,fontWeight:700,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",color:T.text}}>${d.price.toLocaleString(undefined,{maximumFractionDigits:d.price>100?2:4})}</span>:<span className="skeleton" style={{height:11,borderRadius:3}}/>}
-                  {d?<span style={{fontSize:10,fontWeight:700,textAlign:"right",color:chg>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{chg>=0?"+":""}{chg.toFixed(2)}%</span>:<span className="skeleton" style={{height:11,borderRadius:3}}/>}
+                  style={{padding:"8px 14px",display:"grid",gridTemplateColumns:"24px 1fr 50px 42px",gap:8,alignItems:"center",cursor:"pointer",background:selected===coin.id?coin.bg+"60":"transparent"}}>
+                  <div style={{width:22,height:22,borderRadius:6,background:coin.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,fontWeight:800,color:coin.color}}>{coin.id.slice(0,3)}</div>
+                  <div>
+                    <div style={{fontSize:11,fontWeight:600,color:selected===coin.id?coin.color:T.text}}>{coin.id}</div>
+                    {d&&<div style={{fontSize:9,color:chg>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{chg>=0?"+":""}{chg.toFixed(2)}%</div>}
+                  </div>
+                  {d?<span style={{fontSize:10,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:T.text,textAlign:"right"}}>${d.price.toLocaleString(undefined,{maximumFractionDigits:d.price>1000?0:d.price>1?2:4})}</span>:<span className="skeleton" style={{height:10,borderRadius:3}}/>}
+                  <div style={{textAlign:"right",fontSize:9,fontWeight:800,color:sigColor,background:sigColor+"15",borderRadius:4,padding:"2px 4px",textAlign:"center"}}>{sig}</div>
                 </div>
               );
             })}
-            <div style={{padding:"8px 14px",fontSize:10,color:T.textDim,textAlign:"center",borderTop:"1px solid "+T.border}}>
-              Refreshes every 30s · public API · no key required for prices
+            <div style={{padding:"10px 14px",borderTop:"1px solid "+T.border,fontSize:10,color:T.textDim,lineHeight:1.6}}>
+              Signals from live price momentum · select a coin above for deep analysis
             </div>
           </div>
 
