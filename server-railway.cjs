@@ -1648,6 +1648,124 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
     }
   }
 
+
+  // GET /api/crypto-trades?exchange=bybit&key=XXX&secret=YYY
+  // Fetches closed trade history from exchange
+  if (req.method === "GET" && url === "/api/crypto-trades") {
+    try {
+      const qs = new URL(req.url, "http://localhost").searchParams;
+      const exchange    = (qs.get("exchange") || "").toLowerCase();
+      const apiKey      = qs.get("key")    || "";
+      const secret      = qs.get("secret") || "";
+      const passphrase  = qs.get("passphrase") || "";
+      if (!apiKey) return json(res, 400, { error: "Missing API key" });
+
+      const https  = require("https");
+      const crypto = require("crypto");
+      const hmac256 = (data, key) => crypto.createHmac("sha256", key).update(data).digest("hex");
+
+      const httpsGet = (hostname, path, headers) => new Promise((resolve, reject) => {
+        const r = https.request({ hostname, path, method: "GET", headers, timeout: 10000 }, resp => {
+          let d = ""; resp.on("data", c => d += c);
+          resp.on("end", () => { try{resolve({status:resp.statusCode,body:JSON.parse(d)});}catch{resolve({status:resp.statusCode,body:d}); } });
+        });
+        r.on("error", reject); r.on("timeout", () => { r.destroy(); reject(new Error("Timeout")); }); r.end();
+      });
+
+      // ── BYBIT closed PnL ────────────────────────────────────────
+      if (exchange === "bybit") {
+        const ts = Date.now().toString();
+        const recvWindow = "5000";
+        const queryStr = "category=spot&limit=50";
+        const signInput = ts + apiKey + recvWindow + queryStr;
+        const signature = hmac256(signInput, secret);
+        const { status, body } = await httpsGet("api.bybit.com", "/v5/order/history?" + queryStr, {
+          "X-BAPI-API-KEY": apiKey, "X-BAPI-TIMESTAMP": ts,
+          "X-BAPI-RECV-WINDOW": recvWindow, "X-BAPI-SIGN": signature, "Content-Type": "application/json"
+        });
+        if (status !== 200 || body?.retCode !== 0) return json(res, 400, { error: body?.retMsg || "Bybit error" });
+        const orders = (body?.result?.list || []).filter(o => o.orderStatus === "Filled");
+        const trades = orders.map(o => ({
+          id: o.orderId, symbol: o.symbol.replace("USDT",""),
+          side: o.side.toLowerCase(), qty: parseFloat(o.qty||0),
+          price: parseFloat(o.avgPrice||o.price||0),
+          total: parseFloat(o.cumExecValue||0),
+          fee: parseFloat(o.cumExecFee||0),
+          time: new Date(parseInt(o.updatedTime||o.createdTime)).toISOString(),
+          pnl: null // spot orders don't have direct PnL
+        }));
+        // Also fetch closed PnL for futures
+        const ts2 = Date.now().toString();
+        const q2 = "category=linear&limit=50";
+        const sig2 = hmac256(ts2+apiKey+recvWindow+q2, secret);
+        try {
+          const { body: pnlBody } = await httpsGet("api.bybit.com", "/v5/position/closed-pnl?" + q2, {
+            "X-BAPI-API-KEY": apiKey, "X-BAPI-TIMESTAMP": ts2,
+            "X-BAPI-RECV-WINDOW": recvWindow, "X-BAPI-SIGN": sig2, "Content-Type": "application/json"
+          });
+          const pnlList = pnlBody?.result?.list || [];
+          const pnlTrades = pnlList.map(p => ({
+            id: p.orderId, symbol: p.symbol.replace("USDT",""),
+            side: p.side?.toLowerCase(), qty: parseFloat(p.qty||0),
+            price: parseFloat(p.avgEntryPrice||0), exitPrice: parseFloat(p.avgExitPrice||0),
+            total: parseFloat(p.cumEntryValue||0), fee: parseFloat(p.totalEntryFee||0)+parseFloat(p.totalExitFee||0),
+            time: new Date(parseInt(p.updatedTime||p.createdTime)).toISOString(),
+            pnl: parseFloat(p.closedPnl||0), type: "futures"
+          }));
+          return json(res, 200, { exchange:"bybit", trades: [...pnlTrades, ...trades].slice(0,100), fetchedAt: new Date().toISOString() });
+        } catch(e) {
+          return json(res, 200, { exchange:"bybit", trades, fetchedAt: new Date().toISOString() });
+        }
+      }
+
+      // ── BINANCE my trades ───────────────────────────────────────
+      if (exchange === "binance") {
+        const ts = Date.now().toString();
+        const queryStr = "timestamp=" + ts + "&limit=100";
+        const signature = hmac256(queryStr, secret);
+        const { status, body } = await httpsGet("api.binance.com",
+          "/api/v3/myTrades?" + queryStr + "&signature=" + signature,
+          { "X-MBX-APIKEY": apiKey, "Content-Type": "application/json" }
+        );
+        if (status !== 200 || body?.code) return json(res, 400, { error: body?.msg || "Binance error" });
+        const trades = (body||[]).slice(0,100).map(t => ({
+          id: String(t.id), symbol: t.symbol.replace("USDT",""),
+          side: t.isBuyer?"buy":"sell", qty: parseFloat(t.qty),
+          price: parseFloat(t.price), total: parseFloat(t.quoteQty),
+          fee: parseFloat(t.commission), feeCoin: t.commissionAsset,
+          time: new Date(t.time).toISOString(), pnl: null
+        }));
+        return json(res, 200, { exchange:"binance", trades, fetchedAt: new Date().toISOString() });
+      }
+
+      // ── COINBASE fills ──────────────────────────────────────────
+      if (exchange === "coinbase") {
+        const ts = Math.floor(Date.now()/1000).toString();
+        const path = "/v2/transactions?limit=50";
+        const signInput = ts + "GET" + path;
+        const signature = hmac256(signInput, secret);
+        const { status, body } = await httpsGet("api.coinbase.com", path, {
+          "CB-ACCESS-KEY": apiKey, "CB-ACCESS-SIGN": signature,
+          "CB-ACCESS-TIMESTAMP": ts, "CB-VERSION": "2016-02-18", "Content-Type": "application/json"
+        });
+        if (status !== 200) return json(res, 400, { error: "Coinbase error " + status });
+        const trades = (body?.data||[]).filter(t=>t.type==="buy"||t.type==="sell").map(t=>({
+          id: t.id, symbol: t.amount?.currency,
+          side: t.type, qty: Math.abs(parseFloat(t.amount?.amount||0)),
+          price: Math.abs(parseFloat(t.native_amount?.amount||0)/parseFloat(t.amount?.amount||1)),
+          total: Math.abs(parseFloat(t.native_amount?.amount||0)),
+          fee: 0, time: t.created_at, pnl: null
+        }));
+        return json(res, 200, { exchange:"coinbase", trades, fetchedAt: new Date().toISOString() });
+      }
+
+      return json(res, 400, { error: "Exchange not supported for trade history: " + exchange });
+    } catch(e) {
+      console.warn("[CRYPTO-TRADES] Error:", e.message);
+      return json(res, 500, { error: e.message });
+    }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
