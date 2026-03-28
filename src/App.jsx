@@ -3340,7 +3340,7 @@ export default function TradeLedger(){
                   <div style={{fontSize:9,color:T.textDim}}>{todayT.length} trade{todayT.length>1?"s":""}</div>
                 </div>;
               })()}
-            </>}
+            </>
           </div>
         </div>
 
