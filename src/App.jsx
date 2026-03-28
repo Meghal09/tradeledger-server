@@ -548,6 +548,101 @@ function DashboardTab({trades,stats,serverOk,lastSync}){
   );
 }
 
+
+// ── PRICE ALERTS (standalone component — hooks at top level) ──
+function PriceAlerts({watchlist, prices}){
+  const [alertSym,setAlertSym]=useState(watchlist[0]||"");
+  const [alertPrice,setAlertPrice]=useState("");
+  const [alertDir,setAlertDir]=useState("above");
+  const [alerts,setAlerts]=useState(()=>{try{return JSON.parse(localStorage.getItem("tl_price_alerts")||"[]");}catch{return[];}});
+
+  // Keep alertSym in sync when watchlist changes
+  useEffect(()=>{if(!alertSym&&watchlist[0])setAlertSym(watchlist[0]);},[watchlist]);
+
+  // Check alerts against live prices
+  useEffect(()=>{
+    if(!alerts.length)return;
+    let changed=false;
+    const next=alerts.map(al=>{
+      if(al.triggered)return al;
+      const q=prices[al.sym];if(!q?.price)return al;
+      const cur=parseFloat(q.price);
+      const hit=(al.dir==="above"&&cur>=al.price)||(al.dir==="below"&&cur<=al.price);
+      if(hit){
+        changed=true;
+        if(Notification.permission==="granted"){
+          try{new Notification("TradeLedger Alert",{body:al.sym+" hit $"+al.price+" — now $"+cur});}catch{}
+        }
+        return{...al,triggered:true};
+      }
+      return al;
+    });
+    if(changed){setAlerts(next);try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}}
+  },[prices]);
+
+  const saveAlert=()=>{
+    if(!alertSym||!alertPrice)return;
+    const a={id:Date.now(),sym:alertSym,price:parseFloat(alertPrice),dir:alertDir,triggered:false};
+    const next=[...alerts,a];setAlerts(next);
+    try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}
+    setAlertPrice("");
+    if(Notification.permission==="default")Notification.requestPermission();
+  };
+  const removeAlert=id=>{
+    const next=alerts.filter(a=>a.id!==id);
+    setAlerts(next);try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}
+  };
+
+  return (
+    <div className="card" style={{padding:"16px 18px"}}>
+      <div style={{fontSize:13,fontWeight:600,marginBottom:3}}>Price Alerts</div>
+      <div style={{fontSize:11,color:T.textSub,marginBottom:12}}>Get a browser notification when any symbol crosses your target price</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 90px 120px auto",gap:8,alignItems:"end",marginBottom:alerts.length?12:0}}>
+        <div>
+          <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Symbol</div>
+          <select className="input" value={alertSym} onChange={e=>setAlertSym(e.target.value)} style={{fontSize:12}}>
+            {watchlist.map(s=><option key={s} value={s}>{s}</option>)}
+          </select>
+        </div>
+        <div>
+          <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Direction</div>
+          <select className="input" value={alertDir} onChange={e=>setAlertDir(e.target.value)} style={{fontSize:12}}>
+            <option value="above">Above</option>
+            <option value="below">Below</option>
+          </select>
+        </div>
+        <div>
+          <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Target Price</div>
+          <input className="input" type="number" step="any" placeholder="e.g. 1.1000"
+            value={alertPrice} onChange={e=>setAlertPrice(e.target.value)}
+            onKeyDown={e=>{if(e.key==="Enter")saveAlert();}}
+            style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
+        </div>
+        <button className="btn btn-primary" onClick={saveAlert} disabled={!alertPrice||!alertSym} style={{fontSize:11}}>+ Alert</button>
+      </div>
+      {alerts.length>0&&(
+        <div style={{display:"flex",flexDirection:"column",gap:5,marginTop:10}}>
+          {alerts.map(al=>{
+            const q=prices[al.sym],cur=q?parseFloat(q.price):null;
+            const pct=cur?+((cur-al.price)/al.price*100).toFixed(2):null;
+            return (
+              <div key={al.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:8,background:al.triggered?T.greenBg:T.bg,border:"1px solid "+(al.triggered?T.greenBorder:T.border)}}>
+                <div style={{flex:1}}>
+                  <span style={{fontSize:11,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{al.sym}</span>
+                  <span style={{fontSize:11,color:T.textSub,marginLeft:6}}>{al.dir} ${al.price}</span>
+                  {pct!==null&&!al.triggered&&<span style={{fontSize:10,color:Math.abs(pct)<0.5?T.amber:T.textDim,marginLeft:6}}>{pct>=0?"+":""}{pct}% away</span>}
+                </div>
+                {al.triggered?<Badge color="green">Triggered</Badge>:<span style={{fontSize:10,color:T.textDim}}>Watching</span>}
+                <button onClick={()=>removeAlert(al.id)} style={{background:"none",border:"none",color:T.textDim,cursor:"pointer",fontSize:15,lineHeight:1,padding:"0 2px"}}>x</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── WATCHLIST ─────────────────────────────────────────────────
 function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analyseSymbol,trades}){
   const [pickerOpen,setPickerOpen]=useState(false);
@@ -768,81 +863,8 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
             );
           })():(
             <div style={{display:"flex",flexDirection:"column",gap:12}}>
-              {/* Price alert setter */}
-              {(()=>{
-                const [alertSym,setAlertSym]=React.useState(watchlist[0]||"");
-                const [alertPrice,setAlertPrice]=React.useState("");
-                const [alertDir,setAlertDir]=React.useState("above");
-                const [alerts,setAlerts]=React.useState(()=>{try{return JSON.parse(localStorage.getItem("tl_price_alerts")||"[]");}catch{return[];}});
-                const saveAlert=()=>{
-                  if(!alertSym||!alertPrice)return;
-                  const a={id:Date.now(),sym:alertSym,price:parseFloat(alertPrice),dir:alertDir,created:new Date().toISOString(),triggered:false};
-                  const next=[...alerts,a];setAlerts(next);try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}
-                  setAlertPrice("");
-                  if(Notification.permission==="default")Notification.requestPermission();
-                };
-                // Check alerts against live prices
-                React.useEffect(()=>{
-                  if(!alerts.length)return;
-                  alerts.forEach(al=>{
-                    if(al.triggered)return;
-                    const q=prices[al.sym];if(!q?.price)return;
-                    const cur=parseFloat(q.price);
-                    const hit=(al.dir==="above"&&cur>=al.price)||(al.dir==="below"&&cur<=al.price);
-                    if(hit){
-                      const next=alerts.map(a=>a.id===al.id?{...a,triggered:true}:a);
-                      setAlerts(next);try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}
-                      if(Notification.permission==="granted"){new Notification("TradeLedger Alert",{body:al.sym+" is "+al.dir+" $"+al.price+" — now at $"+cur,icon:"/favicon.ico"});}
-                    }
-                  });
-                },[prices,alerts]);
-                const removeAlert=id=>{const next=alerts.filter(a=>a.id!==id);setAlerts(next);try{localStorage.setItem("tl_price_alerts",JSON.stringify(next));}catch{}};
-                return (
-                  <div className="card" style={{padding:"16px 18px"}}>
-                    <div style={{fontSize:13,fontWeight:600,marginBottom:3}}>Price Alerts</div>
-                    <div style={{fontSize:11,color:T.textSub,marginBottom:12}}>Get a browser notification when any symbol hits your target price</div>
-                    <div style={{display:"grid",gridTemplateColumns:"1fr 80px 110px auto",gap:8,alignItems:"end",marginBottom:12}}>
-                      <div>
-                        <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Symbol</div>
-                        <select className="input" value={alertSym} onChange={e=>setAlertSym(e.target.value)} style={{fontSize:12}}>
-                          {watchlist.map(s=><option key={s} value={s}>{s}</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Direction</div>
-                        <select className="input" value={alertDir} onChange={e=>setAlertDir(e.target.value)} style={{fontSize:12}}>
-                          <option value="above">Above</option>
-                          <option value="below">Below</option>
-                        </select>
-                      </div>
-                      <div>
-                        <div style={{fontSize:10,color:T.textDim,marginBottom:3}}>Price</div>
-                        <input className="input" type="number" step="any" placeholder="e.g. 1.1000" value={alertPrice} onChange={e=>setAlertPrice(e.target.value)} style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
-                      </div>
-                      <button className="btn btn-primary" onClick={saveAlert} disabled={!alertPrice||!alertSym} style={{fontSize:11}}>Set Alert</button>
-                    </div>
-                    {alerts.length>0&&(
-                      <div style={{display:"flex",flexDirection:"column",gap:5}}>
-                        {alerts.map(al=>{
-                          const q=prices[al.sym];const cur=q?parseFloat(q.price):null;
-                          const pct=cur?((cur-al.price)/al.price*100):null;
-                          return (
-                            <div key={al.id} style={{display:"flex",alignItems:"center",gap:8,padding:"7px 10px",borderRadius:8,background:al.triggered?T.greenBg:T.bg,border:"1px solid "+(al.triggered?T.greenBorder:T.border)}}>
-                              <div style={{flex:1}}>
-                                <span style={{fontSize:11,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{al.sym}</span>
-                                <span style={{fontSize:11,color:T.textSub,marginLeft:6}}>{al.dir} ${al.price}</span>
-                                {pct!==null&&<span style={{fontSize:10,color:Math.abs(pct)<1?T.amber:T.textDim,marginLeft:6}}>{pct>=0?"+":""}{pct.toFixed(2)}% away</span>}
-                              </div>
-                              {al.triggered&&<Badge color="green">Triggered</Badge>}
-                              <button onClick={()=>removeAlert(al.id)} style={{background:"none",border:"none",color:T.textDim,cursor:"pointer",fontSize:15,lineHeight:1}}>x</button>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                );
-              })()}
+              {/* Price Alerts — proper component so hooks are legal */}
+              <PriceAlerts watchlist={watchlist} prices={prices}/>
               <div className="card" style={{padding:24,textAlign:"center",color:T.textSub,fontSize:13}}>
                 <div style={{fontSize:24,opacity:0.2,marginBottom:8}}>◈</div>
                 <div style={{fontWeight:600,color:T.text,marginBottom:4}}>Select a symbol</div>
@@ -2715,7 +2737,7 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
 }
 
 // ── SETUP ─────────────────────────────────────────────────────
-function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,accounts,setAccounts,activeAccount,setActiveAccount}){
+function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,accounts,setAccounts,activeAccount,setActiveAccount,prices}){
   const [rlInput,setRlInput]=useState(riskLimit||"");
   return (
     <div className="page" style={{overflowY:"auto",height:"100%"}}>
@@ -3124,7 +3146,7 @@ export default function TradeLedger(){
             {tab==="news"&&<NewsTab savedNews={savedNews} setSavedNews={setSavedNews} fetchNews={fetchNews} newsLd={newsLd} openArticle={openArticle} searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchResults={searchResults} searchLd={searchLd} searchErr={searchErr} fetchMarketSearch={fetchMarketSearch}/>}
             {tab==="crypto"&&<CryptoTab prices={prices} pFlash={pFlash} trades={trades} onAddSymbol={onAddSymbol}/>}
             {tab==="journal"&&<JournalTab trades={trades}/>}
-            {tab==="setup"&&<SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit} goals={goals} setGoals={setGoals} accounts={accounts} setAccounts={setAccounts} activeAccount={activeAccount} setActiveAccount={setActiveAccount}/>}
+            {tab==="setup"&&<SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit} goals={goals} setGoals={setGoals} accounts={accounts} setAccounts={setAccounts} activeAccount={activeAccount} setActiveAccount={setActiveAccount} prices={prices}/>}
           </div>
         </div>
       </div>
