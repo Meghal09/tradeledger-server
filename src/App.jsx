@@ -1664,8 +1664,7 @@ function NewsTab({savedNews,setSavedNews,fetchNews,newsLd,openArticle,searchQuer
       })()}
 
       {/* Archive header */}
-      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
-        <div style={{display:"flex",alignItems:"center",gap:10}}>
+      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
         <span style={{fontSize:11,fontWeight:700,color:T.textDim,letterSpacing:"0.06em",textTransform:"uppercase"}}>48h Archive</span>
         <div style={{flex:1,height:1,background:T.border}}/>
         <span style={{fontSize:11,color:T.textDim}}>{valid.length} articles</span>
