@@ -105,6 +105,8 @@ const GlobalStyles=({dark})=>(
     @keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
     @keyframes shimmer{0%{background-position:-200% center;}100%{background-position:200% center;}}
     .page{animation:fadeUp .2s ease both;}
+    .tab-content{animation:fadeUp .18s ease both;}
+    .trow{transition:background .12s;}
     .card{background:#fff;border-radius:14px;border:1px solid ${T.border};box-shadow:0 1px 3px rgba(0,0,0,0.04);}
     .card:hover{border-color:${T.borderHover};}
     .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:8px;border:1px solid ${T.border};background:#fff;color:${T.text};font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;white-space:nowrap;}
@@ -234,9 +236,19 @@ function DashboardTab({trades,stats,serverOk,lastSync}){
           </div>
           <div style={{fontSize:12,color:T.textSub}}>Welcome back — {new Date().toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"})}</div>
         </div>
-        <div style={{display:"flex",alignItems:"center",gap:6,background:serverOk?T.greenBg:T.redBg,border:"1px solid "+(serverOk?T.greenBorder:T.redBorder),borderRadius:20,padding:"3px 12px",fontSize:11,fontWeight:600,color:serverOk?T.green:T.red}}>
-          <div style={{width:5,height:5,borderRadius:"50%",background:serverOk?T.green:T.red,animation:serverOk?"none":"pulse 1.5s infinite"}}/>
-          {serverOk?"Live":"Offline"}
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {fStats&&(()=>{
+            const todayTrades=trades.filter(t=>mt5Day(t.closeTime)===todayStr);
+            const todayPnl=+todayTrades.reduce((s,t)=>s+(t.profit||0)+(t.swap||0)+(t.commission||0),0).toFixed(2);
+            const c=todayPnl>=0?T.green:T.red;
+            const bg=todayPnl>=0?T.greenBg:T.redBg;
+            const border=todayPnl>=0?T.greenBorder:T.redBorder;
+            return todayTrades.length>0?<div style={{background:bg,border:"1px solid "+border,borderRadius:20,padding:"3px 12px",fontSize:11,fontWeight:700,color:c,fontFamily:"'JetBrains Mono',monospace"}}>{todayPnl>=0?"+":""}{todayPnl} today</div>:null;
+          })()}
+          <div style={{display:"flex",alignItems:"center",gap:6,background:serverOk?T.greenBg:T.redBg,border:"1px solid "+(serverOk?T.greenBorder:T.redBorder),borderRadius:20,padding:"3px 12px",fontSize:11,fontWeight:600,color:serverOk?T.green:T.red}}>
+            <div style={{width:5,height:5,borderRadius:"50%",background:serverOk?T.green:T.red,animation:serverOk?"none":"pulse 1.5s infinite"}}/>
+            {serverOk?"Live":"Offline"}
+          </div>
         </div>
       </div>
 
@@ -661,7 +673,14 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
             </span>;
           })()}
         </div>
-        <div style={{display:"flex",gap:8}}>
+        <div style={{display:"flex",gap:8,alignItems:"center"}}>
+          {(()=>{
+            const now=new Date(),u=now.getUTCHours()*60+now.getUTCMinutes();
+            const sess=[{n:"Sydney",c:T.cyan,open:21*60,close:6*60,ov:true},{n:"Tokyo",c:T.amber,open:0,close:9*60,ov:false},{n:"London",c:T.green,open:8*60,close:17*60,ov:false},{n:"New York",c:T.purple,open:13*60,close:22*60,ov:false}];
+            const active=sess.filter(s=>s.ov?(u>=s.open||u<s.close):(u>=s.open&&u<s.close));
+            if(!active.length)return <span style={{fontSize:10,color:T.textDim,background:T.bg,border:"1px solid "+T.border,borderRadius:6,padding:"3px 8px"}}>No session</span>;
+            return <div style={{display:"flex",gap:4}}>{active.map(s=><span key={s.n} style={{fontSize:10,fontWeight:600,color:s.c,background:s.c+"15",border:"1px solid "+s.c+"30",borderRadius:6,padding:"3px 8px"}}>{s.n}</span>)}</div>;
+          })()}
           <button className="btn" onClick={()=>setSizerOpen(p=>!p)}>Position Sizer</button>
           <button className="btn btn-primary" onClick={()=>setPickerOpen(p=>!p)}>+ Add Symbol</button>
         </div>
@@ -1319,7 +1338,15 @@ function CalendarTab({trades,todayNews}){
       })()}
 
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
-        <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Calendar</h1>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
+          <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Calendar</h1>
+          {todayNews.filter(e=>(e.impact||"").toLowerCase()==="high").length>0&&(
+            <span style={{fontSize:11,fontWeight:700,color:T.red,background:T.redBg,border:"1px solid "+T.redBorder,borderRadius:6,padding:"3px 10px",display:"flex",alignItems:"center",gap:5}}>
+              <div style={{width:5,height:5,borderRadius:"50%",background:T.red,animation:"pulse 1.5s infinite"}}/>
+              {todayNews.filter(e=>(e.impact||"").toLowerCase()==="high").length} HIGH impact today
+            </span>
+          )}
+        </div>
         <div style={{display:"flex",gap:8,alignItems:"center"}}>
           <button className="btn" style={{padding:"6px 10px"}} onClick={()=>{const d=new Date(calMonth);d.setMonth(d.getMonth()-1);setCalMonth(d);setSelectedDay(null);}}>prev</button>
           <span style={{fontSize:13,fontWeight:600,minWidth:140,textAlign:"center"}}>{calMonth.toLocaleString("default",{month:"long",year:"numeric"})}</span>
@@ -1637,7 +1664,8 @@ function NewsTab({savedNews,setSavedNews,fetchNews,newsLd,openArticle,searchQuer
       })()}
 
       {/* Archive header */}
-      <div style={{display:"flex",alignItems:"center",gap:10,marginBottom:14}}>
+      <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:14}}>
+        <div style={{display:"flex",alignItems:"center",gap:10}}>
         <span style={{fontSize:11,fontWeight:700,color:T.textDim,letterSpacing:"0.06em",textTransform:"uppercase"}}>48h Archive</span>
         <div style={{flex:1,height:1,background:T.border}}/>
         <span style={{fontSize:11,color:T.textDim}}>{valid.length} articles</span>
@@ -2086,6 +2114,7 @@ function JournalTab({trades}){
         <div style={{display:"flex",gap:8}}>
           {entries.length>=3&&<button className="btn" onClick={genCoaching} disabled={coachingLd}>{coachingLd?"Analysing...":"AI Coaching"}</button>}
           {coaching&&<button className="btn" onClick={()=>setView("coaching")}>View Coaching</button>}
+          {trades.length>0&&<button className="btn" style={{fontSize:11}} onClick={()=>{const t=[...trades].reverse()[0];setForm(f=>({...f,symbol:t.symbol||"",type:t.type||"buy",pnl:((t.profit||0)+(t.swap||0)+(t.commission||0)).toFixed(2),outcome:(t.profit||0)>0?"win":(t.profit||0)<0?"loss":"breakeven",date:mt5Day(t.closeTime)||new Date().toISOString().slice(0,10)}));setView("new");}}>Import MT5</button>}
           <button className="btn btn-primary" onClick={()=>setView("new")}>+ New Entry</button>
         </div>
       </div>
@@ -2675,38 +2704,6 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
             </div>
           </div>
 
-          {/* Coin Analysis summary */}
-          <div className="card" style={{overflow:"hidden"}}>
-            <div style={{padding:"11px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-              <span style={{fontSize:12,fontWeight:600}}>Market Snapshot</span>
-              <div style={{display:"flex",alignItems:"center",gap:5,fontSize:10,color:T.textDim}}>
-                <div style={{width:5,height:5,borderRadius:"50%",background:T.green,animation:"pulse 2s infinite"}}/>
-                <span>Live</span>
-              </div>
-            </div>
-            {CRYPTO_COINS.slice(0,6).map(coin=>{
-              const d=cryptoPrices[coin.id];
-              const chg=d?.chg||0;
-              const sig=chg>1.5?"BUY":chg<-1.5?"SELL":"HOLD";
-              const sigColor=sig==="BUY"?T.green:sig==="SELL"?T.red:T.textDim;
-              return (
-                <div key={coin.id} className="trow" onClick={()=>setSelected(coin.id)}
-                  style={{padding:"8px 14px",display:"grid",gridTemplateColumns:"24px 1fr 50px 42px",gap:8,alignItems:"center",cursor:"pointer",background:selected===coin.id?coin.bg+"60":"transparent"}}>
-                  <div style={{width:22,height:22,borderRadius:6,background:coin.bg,display:"flex",alignItems:"center",justifyContent:"center",fontSize:8,fontWeight:800,color:coin.color}}>{coin.id.slice(0,3)}</div>
-                  <div>
-                    <div style={{fontSize:11,fontWeight:600,color:selected===coin.id?coin.color:T.text}}>{coin.id}</div>
-                    {d&&<div style={{fontSize:9,color:chg>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{chg>=0?"+":""}{chg.toFixed(2)}%</div>}
-                  </div>
-                  {d?<span style={{fontSize:10,fontWeight:700,fontFamily:"'JetBrains Mono',monospace",color:T.text,textAlign:"right"}}>${d.price.toLocaleString(undefined,{maximumFractionDigits:d.price>1000?0:d.price>1?2:4})}</span>:<span className="skeleton" style={{height:10,borderRadius:3}}/>}
-                  <div style={{textAlign:"right",fontSize:9,fontWeight:800,color:sigColor,background:sigColor+"15",borderRadius:4,padding:"2px 4px",textAlign:"center"}}>{sig}</div>
-                </div>
-              );
-            })}
-            <div style={{padding:"10px 14px",borderTop:"1px solid "+T.border,fontSize:10,color:T.textDim,lineHeight:1.6}}>
-              Signals from live price momentum · select a coin above for deep analysis
-            </div>
-          </div>
-
 
           {/* Crypto rules */}
           <div className="card" style={{padding:"14px 16px",background:"linear-gradient(135deg,rgba(247,147,26,0.05),rgba(98,126,234,0.05))"}}>
@@ -2728,7 +2725,13 @@ function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,account
   const [rlInput,setRlInput]=useState(riskLimit||"");
   return (
     <div className="page" style={{overflowY:"auto",height:"100%"}}>
-      <div style={{marginBottom:20}}><h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>EA Setup</h1><p style={{fontSize:12,color:T.textSub,marginTop:1}}>Configure your MetaTrader 5 connection</p></div>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
+        <div><h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Setup</h1><p style={{fontSize:12,color:T.textSub,marginTop:1}}>Configure your MT5 connection and preferences</p></div>
+        <div style={{fontSize:10,color:T.textDim,textAlign:"right",fontFamily:"'JetBrains Mono',monospace"}}>
+          <div style={{marginBottom:2}}>TradeLedger v2.0</div>
+          <div style={{color:T.textDim}}>{trades.length} trades · {new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</div>
+        </div>
+      </div>
       {/* Health strip */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
         {[
@@ -3083,6 +3086,17 @@ export default function TradeLedger(){
             <>
               {sessions.map(s=><div key={s.name} style={{display:"flex",alignItems:"center",gap:6,padding:"2px 6px",opacity:s.active?1:0.35}}><div style={{width:4,height:4,borderRadius:"50%",background:s.active?s.color:T.textDim,flexShrink:0}}/><span style={{fontSize:9,color:s.active?T.textSub:T.textDim,whiteSpace:"nowrap"}}>{s.name}</span></div>)}
               <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:T.textDim,fontFamily:"'JetBrains Mono',monospace",padding:"4px 6px",marginTop:4}}><span>{utcStr}</span><span>{localStr}</span></div>
+              {(()=>{
+                const todayStr=new Date().toISOString().slice(0,10);
+                const todayT=trades.filter(t=>mt5Day(t.closeTime)===todayStr);
+                const pnl=+todayT.reduce((s,t)=>s+(t.profit||0)+(t.swap||0)+(t.commission||0),0).toFixed(2);
+                if(!todayT.length)return null;
+                return <div style={{margin:"4px 6px 0",padding:"5px 8px",borderRadius:7,background:pnl>=0?T.greenBg:T.redBg,border:"1px solid "+(pnl>=0?T.greenBorder:T.redBorder)}}>
+                  <div style={{fontSize:8,color:pnl>=0?T.green:T.red,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:1}}>Today</div>
+                  <div style={{fontSize:12,fontWeight:800,color:pnl>=0?T.green:T.red,fontFamily:"'JetBrains Mono',monospace"}}>{pnl>=0?"+":""}{pnl}</div>
+                  <div style={{fontSize:9,color:T.textDim}}>{todayT.length} trade{todayT.length>1?"s":""}</div>
+                </div>;
+              })()}
             </>}
           </div>
         </div>
