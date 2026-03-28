@@ -1934,6 +1934,12 @@ function JournalTab({trades}){
           </div>
         </div>
         <div style={{display:"flex",gap:8}}>
+          {selected.needsReview&&!selected.reviewed&&(
+            <button className="btn btn-primary" style={{fontSize:11,background:T.green,borderColor:T.green}} onClick={()=>{
+              const updated=entries.map(e=>e.id===selected.id?{...e,reviewed:true,needsReview:false}:e);
+              save(updated);setSelected({...selected,reviewed:true,needsReview:false});
+            }}>Mark Reviewed</button>
+          )}
           <button className="btn" style={{color:T.red,borderColor:T.redBorder}} onClick={()=>deleteEntry(selected.id)}>Delete</button>
         </div>
       </div>
@@ -1982,6 +1988,16 @@ function JournalTab({trades}){
 
   if(view==="new") return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:20}}>
+      {(()=>{
+        const drafts=entries.filter(e=>e.needsReview&&!e.reviewed);
+        if(!drafts.length||view!=="new")return null;
+        return (
+          <div style={{background:T.blueBg,border:"1px solid rgba(79,128,255,.25)",borderRadius:10,padding:"10px 14px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div style={{fontSize:12,color:T.blue}}><strong>{drafts.length} auto draft{drafts.length>1?"s":""}</strong> waiting — or fill in the form below for a manual entry</div>
+            <button className="btn" style={{fontSize:11}} onClick={()=>{setSelected(drafts[0]);setView("detail");}}>Go to Draft</button>
+          </div>
+        );
+      })()}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
         <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>New Journal Entry</h1>
         <div style={{display:"flex",gap:8}}>
@@ -2170,6 +2186,21 @@ function JournalTab({trades}){
         );
       })()}
 
+      {/* Needs review banner */}
+      {(()=>{
+        const needsReview=entries.filter(e=>e.needsReview&&!e.reviewed);
+        if(!needsReview.length)return null;
+        return (
+          <div style={{background:"linear-gradient(135deg,rgba(79,128,255,.08),rgba(139,92,246,.06))",border:"1px solid rgba(79,128,255,.25)",borderRadius:12,padding:"12px 16px",marginBottom:12,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+            <div>
+              <div style={{fontSize:12,fontWeight:700,color:T.blue,marginBottom:2}}>{needsReview.length} trade{needsReview.length>1?"s":""} auto-added from MT5</div>
+              <div style={{fontSize:11,color:T.textSub}}>Add your notes, emotion and screenshot to complete {needsReview.length>1?"them":"it"}</div>
+            </div>
+            <button className="btn btn-primary" style={{fontSize:11}} onClick={()=>{setSelected(needsReview[0]);setView("detail");}}>Review Now</button>
+          </div>
+        );
+      })()}
+
       {entries.length===0?(
         <div className="card" style={{padding:"48px 24px",textAlign:"center"}}>
           <div style={{fontSize:40,opacity:.15,marginBottom:16,fontWeight:800}}>J</div>
@@ -2211,7 +2242,11 @@ function JournalTab({trades}){
                 <div style={{flex:1,padding:"12px 16px",display:"grid",gridTemplateColumns:"100px 1fr 1fr 120px 100px 80px",gap:12,alignItems:"center"}}>
                   {/* Symbol + date */}
                   <div>
-                    <div style={{fontSize:13,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{entry.symbol}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:5}}>
+                      <span style={{fontSize:13,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{entry.symbol}</span>
+                      {entry.auto&&!entry.reviewed&&<span style={{fontSize:9,fontWeight:700,color:T.blue,background:T.blueBg,border:"1px solid rgba(79,128,255,.25)",borderRadius:4,padding:"1px 5px"}}>AUTO</span>}
+                      {entry.needsReview&&!entry.reviewed&&<span style={{fontSize:9,fontWeight:700,color:T.amber,background:T.amberBg,border:"1px solid rgba(245,158,11,.25)",borderRadius:4,padding:"1px 5px"}}>REVIEW</span>}
+                    </div>
                     <div style={{fontSize:10,color:T.textDim,marginTop:2}}>{entry.date}</div>
                   </div>
                   {/* Setup */}
@@ -2910,14 +2945,53 @@ export default function TradeLedger(){
 
   useEffect(()=>{try{localStorage.setItem("tl_saved_news",JSON.stringify(savedNews.slice(0,200)));}catch{}},[savedNews]);
 
-  const connectWS=useCallback(()=>{
-    if(wsRef.current?.readyState===WebSocket.OPEN)return;
-    try{const ws=new WebSocket(WS_URL);wsRef.current=ws;ws.onopen=()=>{};ws.onclose=()=>{reconnRef.current=setTimeout(connectWS,5000);};ws.onerror=()=>{ws.close();};ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(m.type==="TRADE_UPDATE"||m.type==="NEW_TRADE"||m.type==="TRADES_REPLACED"){setTrades(m.trades||[]);setLastSync(new Date().toISOString());}if(m.type==="CLEARED")setTrades([]);}catch{}};}catch{}
+  const prevTradeIdsRef=useRef(new Set());
+
+  // Auto-journal: called when new trades arrive via WebSocket
+  const autoJournalNewTrades=useCallback((newTrades, oldIds)=>{
+    const JKEY="tl_journal_entries";
+    const existing=new Set(
+      (()=>{try{return JSON.parse(localStorage.getItem(JKEY)||"[]");}catch{return[];}})()
+        .map(e=>e.sourceTradeId)
+        .filter(Boolean)
+    );
+    const newlyClosed=newTrades.filter(t=>{
+      // Must be a closed trade (has closeTime), not already journalled, not in old set
+      const id=t.ticket||t.id||t.order;
+      return t.closeTime && !existing.has(String(id)) && !oldIds.has(String(id));
+    });
+    if(!newlyClosed.length)return;
+    const drafts=(()=>{try{return JSON.parse(localStorage.getItem(JKEY)||"[]");}catch{return[];}})();
+    const newDrafts=newlyClosed.map(t=>{
+      const net=(t.profit||0)+(t.swap||0)+(t.commission||0);
+      return {
+        id:"auto_"+Date.now()+"_"+(t.ticket||Math.random()),
+        sourceTradeId:String(t.ticket||t.id||t.order||""),
+        createdAt:new Date().toISOString(),
+        auto:true, // flag as auto-created draft
+        date:mt5Day(t.closeTime)||new Date().toISOString().slice(0,10),
+        symbol:t.symbol||"",
+        type:(t.type||"buy").toLowerCase().includes("sell")?"sell":"buy",
+        pnl:+net.toFixed(2),
+        outcome:net>0?"win":net<0?"loss":"breakeven",
+        setup:"", reason:"", emotion:"", mistakes:"", lessons:"",
+        rating:3, screenshot:null, tags:[],
+        needsReview:true, // prompt user to fill in details
+      };
+    });
+    const merged=[...newDrafts,...drafts];
+    try{localStorage.setItem(JKEY,JSON.stringify(merged));}catch{}
+    console.log("[JOURNAL] Auto-added "+newDrafts.length+" trade draft(s)");
   },[]);
 
+  const connectWS=useCallback(()=>{
+    if(wsRef.current?.readyState===WebSocket.OPEN)return;
+    try{const ws=new WebSocket(WS_URL);wsRef.current=ws;ws.onopen=()=>{};ws.onclose=()=>{reconnRef.current=setTimeout(connectWS,5000);};ws.onerror=()=>{ws.close();};ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(m.type==="TRADE_UPDATE"||m.type==="NEW_TRADE"||m.type==="TRADES_REPLACED"){const incoming=m.trades||[];autoJournalNewTrades(incoming,prevTradeIdsRef.current);prevTradeIdsRef.current=new Set(incoming.map(t=>String(t.ticket||t.id||t.order||"")));setTrades(incoming);setLastSync(new Date().toISOString());}if(m.type==="CLEARED")setTrades([]);}catch{}};}catch{}
+  },[autoJournalNewTrades]);
+
   const fetchAll=useCallback(async()=>{
-    try{const[tr,st]=await Promise.all([fetch(SERVER+"/api/trades"),fetch(SERVER+"/api/status")]);if(st.ok)setServerOk(true);if(tr.ok){const d=await tr.json();setTrades(d.trades||[]);setLastSync(new Date().toISOString());}}catch{setServerOk(false);}
-  },[]);
+    try{const[tr,st]=await Promise.all([fetch(SERVER+"/api/trades"),fetch(SERVER+"/api/status")]);if(st.ok)setServerOk(true);if(tr.ok){const d=await tr.json();const incoming=d.trades||[];autoJournalNewTrades(incoming,prevTradeIdsRef.current);prevTradeIdsRef.current=new Set(incoming.map(t=>String(t.ticket||t.id||t.order||"")));setTrades(incoming);setLastSync(new Date().toISOString());}}catch{setServerOk(false);}
+  },[autoJournalNewTrades]);
 
   useEffect(()=>{fetchAll();},[fetchAll]);
   useEffect(()=>{const t=setInterval(fetchAll,30000);return()=>clearInterval(t);},[fetchAll]);
