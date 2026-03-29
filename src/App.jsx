@@ -651,6 +651,25 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
   const [sizerAccount,setSizerAccount]=useState("10000");
   const [sizerRisk,setSizerRisk]=useState("1");
   const [sizerSlPips,setSizerSlPips]=useState("20");
+  const [indicators,setIndicators]=useState({});
+  const [sparklines,setSparklines]=useState({});
+  const [indInterval,setIndInterval]=useState("1h");
+
+  // Fetch real RSI+EMA from Twelve Data for selected symbol
+  useEffect(()=>{
+    if(!selectedSym)return;
+    const load=async()=>{
+      try{
+        const r=await fetch(SERVER+"/api/indicators?symbol="+selectedSym+"&interval="+indInterval,{signal:AbortSignal.timeout(12000)});
+        if(r.ok){const d=await r.json();setIndicators(prev=>({...prev,[selectedSym+indInterval]:d}));}
+      }catch{}
+      try{
+        const r=await fetch(SERVER+"/api/sparkline?symbol="+selectedSym+"&interval="+indInterval+"&bars=48",{signal:AbortSignal.timeout(12000)});
+        if(r.ok){const d=await r.json();setSparklines(prev=>({...prev,[selectedSym+indInterval]:d.candles||[]}));}
+      }catch{}
+    };
+    load();
+  },[selectedSym,indInterval]);
 
   // Streak analysis
   const getStreak=(sym)=>{
@@ -845,10 +864,82 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
                       </div>
                       <div style={{height:4,background:T.bg,borderRadius:2}}><div style={{height:"100%",width:a.confidence+"%",background:a.confidence>=70?T.green:a.confidence>=55?T.amber:T.textDim,borderRadius:2,transition:"width .6s"}}/></div>
                     </div>
+                    {/* Interval selector */}
+                    <div style={{display:"flex",gap:4,marginBottom:10}}>
+                      {["15min","1h","4h","1day"].map(iv=>(
+                        <button key={iv} onClick={()=>setIndInterval(iv)} style={{padding:"3px 10px",borderRadius:6,border:"none",cursor:"pointer",fontSize:10,fontWeight:indInterval===iv?700:400,background:indInterval===iv?T.blue:"transparent",color:indInterval===iv?"#fff":T.textSub,transition:"all .12s"}}>{iv}</button>
+                      ))}
+                    </div>
+                    {/* Real RSI + EMA from Twelve Data */}
+                    {(()=>{
+                      const ind=indicators[selectedSym+indInterval];
+                      if(!ind||ind.error)return <div style={{fontSize:11,color:T.textDim,marginBottom:10}}>Loading indicators... (requires Twelve Data key)</div>;
+                      const rsiN=parseFloat(ind.rsi||50);
+                      const rsiColor=rsiN>=70?T.red:rsiN<=30?T.green:T.amber;
+                      const macdBull=ind.macd&&ind.macdSignal&&parseFloat(ind.macd)>parseFloat(ind.macdSignal);
+                      return (
+                        <div style={{marginBottom:12}}>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6,marginBottom:8}}>
+                            {[
+                              {l:"RSI(14)",v:ind.rsi||"--",c:rsiColor,note:rsiN>=70?"Overbought":rsiN<=30?"Oversold":"Neutral"},
+                              {l:"EMA 20",v:ind.ema20?parseFloat(ind.ema20).toFixed(4):"--",c:T.blue},
+                              {l:"EMA 50",v:ind.ema50?parseFloat(ind.ema50).toFixed(4):"--",c:T.purple},
+                              {l:"MACD",v:macdBull?"Bullish":"Bearish",c:macdBull?T.green:T.red},
+                            ].map(x=>(
+                              <div key={x.l} style={{background:T.bg,borderRadius:7,padding:"6px 8px",textAlign:"center"}}>
+                                <div style={{fontSize:8,color:T.textDim,textTransform:"uppercase",letterSpacing:"0.05em",marginBottom:2}}>{x.l}</div>
+                                <div style={{fontSize:11,fontWeight:700,color:x.c,fontFamily:"'JetBrains Mono',monospace"}}>{x.v}</div>
+                                {x.note&&<div style={{fontSize:8,color:x.c,marginTop:1}}>{x.note}</div>}
+                              </div>
+                            ))}
+                          </div>
+                          {/* Real signal from TD indicators */}
+                          {ind.signal&&ind.signal!=="HOLD"&&<div style={{fontSize:11,color:T.textSub,background:T.bg,borderRadius:7,padding:"6px 10px",borderLeft:"3px solid "+(ind.signal==="BUY"?T.green:T.red)}}>
+                            Real signal ({indInterval}): <strong style={{color:ind.signal==="BUY"?T.green:T.red}}>{ind.signal}</strong> — confidence {ind.confidence}% based on RSI + EMA crossover{ind.macd?" + MACD":""}
+                          </div>}
+                        </div>
+                      );
+                    })()}
                     {/* Catalyst */}
                     <div style={{fontSize:12,color:T.textSub,lineHeight:1.65,borderLeft:`3px solid ${sc}40`,paddingLeft:10}}>{a.catalyst}</div>
                   </div>
                 </div>
+                {/* Sparkline OHLCV chart */}
+                {sparklines[selectedSym+indInterval]?.length>4&&(()=>{
+                  const candles=sparklines[selectedSym+indInterval];
+                  const closes=candles.map(c=>c.c);
+                  const minC=Math.min(...closes),maxC=Math.max(...closes),range=maxC-minC||1;
+                  const W=400,H=80,pad=4;
+                  const x=(i)=>pad+(i/(candles.length-1))*(W-pad*2);
+                  const y=(v)=>H-pad-(v-minC)/range*(H-pad*2);
+                  const isUp=closes[closes.length-1]>=closes[0];
+                  const lineColor=isUp?T.green:T.red;
+                  const points=closes.map((c,i)=>x(i)+","+y(c)).join(" ");
+                  const areaPoints="0,"+H+" "+points+" "+x(closes.length-1)+","+H;
+                  return (
+                    <div className="card" style={{overflow:"hidden",marginBottom:12}}>
+                      <div style={{padding:"8px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                        <span style={{fontSize:11,fontWeight:600}}>{selectedSym} · {indInterval} chart</span>
+                        <span style={{fontSize:10,color:T.textDim}}>{candles.length} bars · Twelve Data</span>
+                      </div>
+                      <div style={{padding:"8px 4px 4px",background:T.bg}}>
+                        <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:80,display:"block"}}>
+                          <defs>
+                            <linearGradient id={"sg"+selectedSym} x1="0" y1="0" x2="0" y2="1">
+                              <stop offset="0%" stopColor={lineColor} stopOpacity="0.25"/>
+                              <stop offset="100%" stopColor={lineColor} stopOpacity="0.02"/>
+                            </linearGradient>
+                          </defs>
+                          <polygon points={areaPoints} fill={"url(#sg"+selectedSym+")"} />
+                          <polyline points={points} fill="none" stroke={lineColor} strokeWidth="1.5" strokeLinejoin="round"/>
+                          {/* Current price dot */}
+                          <circle cx={x(closes.length-1)} cy={y(closes[closes.length-1])} r="3" fill={lineColor} stroke={T.surface} strokeWidth="1.5"/>
+                        </svg>
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* How to trade */}
                 <div className="card" style={{padding:"16px 18px"}}>
                   <div style={{fontSize:12,fontWeight:600,color:sc,marginBottom:10,textTransform:"uppercase",letterSpacing:"0.05em"}}>How to Trade This</div>
@@ -2439,9 +2530,37 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
   const selCoin=CRYPTO_COINS.find(c=>c.id===selected)||CRYPTO_COINS[0];
   const selData=cryptoPrices[selected];
 
-  // Load crypto prices from exchange public API
+  // Load crypto prices — prefer Twelve Data via server, fallback to exchange public APIs
   const loadPrices=useCallback(async()=>{
     setLoading(true);
+    // Try Twelve Data first (via our server /api/quote)
+    try{
+      const syms=CRYPTO_COINS.map(c=>c.id+"USD").join(",");
+      const r=await fetch(SERVER+"/api/quote?symbols="+syms,{signal:AbortSignal.timeout(10000)});
+      if(r.ok){
+        const d=await r.json();
+        const quotes=d.quotes||{};
+        const results={};
+        CRYPTO_COINS.forEach(coin=>{
+          const q=quotes[coin.id+"USD"];
+          if(q?.price){
+            results[coin.id]={
+              price:parseFloat(q.price),
+              chg:parseFloat(q.changePct)||0,
+              high:parseFloat(q.high)||0,
+              low:parseFloat(q.low)||0,
+              vol:0,turnover:0
+            };
+          }
+        });
+        if(Object.keys(results).length>=4){
+          setCryptoPrices(results);
+          setLoading(false);
+          return;
+        }
+      }
+    }catch{}
+    // Fallback: fetch from exchange public APIs
     const results={};
     const fetcher=activeExchange==="binance"?fetchBinancePrice:activeExchange==="coinbase"?fetchCoinbasePrice:fetchBybitPrice;
     await Promise.all(CRYPTO_COINS.map(async coin=>{
