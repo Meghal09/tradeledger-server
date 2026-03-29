@@ -1718,13 +1718,19 @@ function CalendarTab({trades,todayNews}){
             // Show events for the selected day, falling back to today
             const targetDay=selectedDay||localDay();
             // Filter from the full week feed stored on window, or fall back to todayNews
-            const weekEvents=(typeof window!=="undefined"&&window._weekEvents)||todayNews;
+            const weekEvents=window._weekEvents||todayNews;
+            // ForexFactory date is "2026-03-31T08:30:00Z" — slice(0,10) = "2026-03-31"
+            // But selectedDay is local date — we need to compare carefully
+            // Use UTC date from event, compare to targetDay treating it as UTC too
             const dayEvents=weekEvents.filter(e=>{
               const evtDate=e.date||e.time||e.datetime||"";
               if(!evtDate)return false;
+              // Try UTC slice first (ForexFactory format)
+              const utcSlice=(evtDate||"").slice(0,10);
+              if(utcSlice===targetDay)return true;
+              // Try parsing as local
               try{return localDay(new Date(evtDate))===targetDay;}catch{return false;}
             });
-            // If no week events cached, just show todayNews when viewing today
             const eventsToShow=dayEvents.length>0?dayEvents:(targetDay===localDay()?todayNews:[]);
             if(!eventsToShow.length)return null;
             const grouped={high:eventsToShow.filter(e=>(e.impact||"").toLowerCase()==="high"),medium:eventsToShow.filter(e=>(e.impact||"").toLowerCase()==="medium"),low:eventsToShow.filter(e=>!["high","medium"].includes((e.impact||"").toLowerCase()))};
@@ -3640,16 +3646,19 @@ export default function TradeLedger(){
       const allEvents=d.events||[];
       const todayStr=localDay();
       // Filter to TODAY's events only — compare event date to local today
+      // ForexFactory uses UTC ISO dates e.g. "2026-03-31T08:30:00Z"
+      // Match events where either the UTC date OR local date matches today
+      const todayUTC=new Date().toISOString().slice(0,10);
       const todayOnly=allEvents.filter(e=>{
         const evtDate=e.date||e.time||e.datetime||"";
         if(!evtDate)return false;
+        const utcSlice=(evtDate||"").slice(0,10);
+        if(utcSlice===todayUTC)return true;
         try{return localDay(new Date(evtDate))===todayStr;}catch{return false;}
       });
       setTodayNews(todayOnly);
-      // Store full week events in global for the scheduler
-      global._allWeekEvents=allEvents;
-      // Also cache on window so CalendarTab can filter by any selected day
-      if(typeof window!=="undefined")window._weekEvents=allEvents;
+      // Cache full week on window so CalendarTab can filter by any selected day
+      window._weekEvents=allEvents;
     }}catch{}};
     load();const t=setInterval(load,3600000);return()=>clearInterval(t);
   },[]);
