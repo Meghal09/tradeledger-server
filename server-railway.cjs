@@ -1912,6 +1912,46 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
     }
   }
 
+
+  // ── TELEGRAM ALERTS ──────────────────────────────────────────────────────
+  if (req.method === "GET" && url === "/api/telegram/test") {
+    const bot = process.env.TELEGRAM_BOT_TOKEN || "";
+    const chatId = process.env.TELEGRAM_CHAT_ID || (new URL(req.url,"http://x").searchParams.get("chatId")||"");
+    if (!bot) return json(res, 200, { ok: false, error: "TELEGRAM_BOT_TOKEN not set in Railway Variables" });
+    if (!chatId) return json(res, 200, { ok: false, error: "No chat ID — send a message to your bot first, then paste the chat ID" });
+    const https = require("https");
+    const msg = encodeURIComponent("TradeLedger connected! Your alerts are active.");
+    const r = https.get(`https://api.telegram.org/bot${bot}/sendMessage?chat_id=${chatId}&text=${msg}&parse_mode=HTML`, resp => {
+      let d = ""; resp.on("data", c => d += c);
+      resp.on("end", () => {
+        try { const p = JSON.parse(d); return json(res, 200, { ok: p.ok, error: p.description || null }); }
+        catch { return json(res, 200, { ok: false, error: "Parse error" }); }
+      });
+    });
+    r.on("error", e => json(res, 200, { ok: false, error: e.message }));
+    return;
+  }
+
+  if (req.method === "POST" && url === "/api/telegram/send") {
+    try {
+      const bot = process.env.TELEGRAM_BOT_TOKEN || "";
+      if (!bot) return json(res, 200, { ok: false, error: "No bot token" });
+      const body = await new Promise(resolve => { let d = ""; req.on("data", c => d += c); req.on("end", () => { try{resolve(JSON.parse(d));}catch{resolve({});} }); });
+      const chatId = body.chatId || process.env.TELEGRAM_CHAT_ID || "";
+      const text = body.text || "";
+      if (!chatId || !text) return json(res, 400, { error: "chatId and text required" });
+      const https = require("https");
+      const payload = JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" });
+      await new Promise((resolve, reject) => {
+        const r = https.request({ hostname: "api.telegram.org", path: `/bot${bot}/sendMessage`, method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+        }, resp => { let d = ""; resp.on("data", c => d += c); resp.on("end", () => resolve(d)); });
+        r.on("error", reject); r.write(payload); r.end();
+      });
+      return json(res, 200, { ok: true });
+    } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
