@@ -1766,6 +1766,152 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
     }
   }
 
+
+  // GET /api/indicators?symbol=EURUSD&interval=1h
+  // Returns RSI(14), EMA(20), EMA(50), MACD from Twelve Data
+  if (req.method === "GET" && url === "/api/indicators") {
+    try {
+      const qs = new URL(req.url, "http://localhost").searchParams;
+      const sym = (qs.get("symbol") || "").toUpperCase();
+      const interval = qs.get("interval") || "1h";
+      const TD_KEY = process.env.TWELVE_DATA_KEY || "";
+      if (!sym) return json(res, 400, { error: "symbol required" });
+      if (!TD_KEY) return json(res, 200, { error: "No Twelve Data key", rsi:null, ema20:null, ema50:null });
+
+      const https = require("https");
+      const get = (path) => new Promise((resolve, reject) => {
+        const r = https.request({ hostname:"api.twelvedata.com", path, method:"GET", timeout:10000,
+          headers:{"User-Agent":"TradeLedger/1.0","Accept":"application/json"}
+        }, resp => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{resolve(JSON.parse(d));}catch{resolve({});} }); });
+        r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));}); r.end();
+      });
+
+      // Map MT5 symbols to TD format
+      const TD_MAP = {
+        "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
+        "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","GBPJPY":"GBP/JPY",
+        "EURJPY":"EUR/JPY","EURGBP":"EUR/GBP","XAUUSD":"XAU/USD","XAGUSD":"XAG/USD",
+        "BTCUSD":"BTC/USD","ETHUSD":"ETH/USD","SOLUSD":"SOL/USD","BNBUSD":"BNB/USD",
+        "NAS100":"NDX","SPX500":"SPX","US30":"DJI","USOIL":"WTI","UKOIL":"BRENT",
+      };
+      const tdSym = encodeURIComponent(TD_MAP[sym] || sym);
+      const base = `?symbol=${tdSym}&interval=${interval}&apikey=${TD_KEY}&outputsize=2&dp=5`;
+
+      const [rsiData, ema20Data, ema50Data, macdData] = await Promise.allSettled([
+        get("/rsi" + base + "&time_period=14"),
+        get("/ema" + base + "&time_period=20"),
+        get("/ema" + base.replace("outputsize=2","outputsize=2") + "&time_period=50"),
+        get("/macd" + base + "&fast_period=12&slow_period=26&signal_period=9"),
+      ]);
+
+      const val = (r, path) => {
+        if (r.status !== "fulfilled") return null;
+        const d = r.value;
+        if (d.status === "error" || d.code) return null;
+        const v = d.values?.[0];
+        if (!v) return null;
+        return path.split(".").reduce((o,k)=>o?.[k], v);
+      };
+
+      const rsi     = val(rsiData,   "rsi");
+      const ema20   = val(ema20Data,  "ema");
+      const ema50   = val(ema50Data,  "ema");
+      const macdVal = val(macdData,   "macd");
+      const macdSig = val(macdData,   "macd_signal");
+      const macdHist= val(macdData,   "macd_hist");
+
+      // Derive signal from real indicators
+      let signal = "HOLD", confidence = 50;
+      if (rsi && ema20 && ema50) {
+        const rsiN = parseFloat(rsi), e20 = parseFloat(ema20), e50 = parseFloat(ema50);
+        const bullish = e20 > e50;
+        const overbought = rsiN > 70, oversold = rsiN < 30;
+        if (bullish && !overbought && rsiN > 50)  { signal = "BUY";  confidence = Math.min(85, 55 + Math.round((rsiN-50)*0.6)); }
+        if (!bullish && !oversold && rsiN < 50)   { signal = "SELL"; confidence = Math.min(85, 55 + Math.round((50-rsiN)*0.6)); }
+        if (oversold)  { signal = "BUY";  confidence = 75; }
+        if (overbought){ signal = "SELL"; confidence = 72; }
+        // MACD confirmation boosts confidence
+        if (macdVal && macdSig) {
+          const macdCross = (parseFloat(macdVal) > parseFloat(macdSig)) === (signal === "BUY");
+          if (macdCross) confidence = Math.min(90, confidence + 8);
+        }
+      }
+
+      console.log("[INDICATORS]", sym, interval, "RSI:", rsi, "EMA20:", ema20, "Signal:", signal);
+      return json(res, 200, {
+        symbol: sym, interval, signal, confidence,
+        rsi: rsi ? parseFloat(rsi).toFixed(2) : null,
+        ema20: ema20 ? parseFloat(ema20).toFixed(5) : null,
+        ema50: ema50 ? parseFloat(ema50).toFixed(5) : null,
+        macd: macdVal ? parseFloat(macdVal).toFixed(5) : null,
+        macdSignal: macdSig ? parseFloat(macdSig).toFixed(5) : null,
+        macdHist: macdHist ? parseFloat(macdHist).toFixed(5) : null,
+        fetchedAt: new Date().toISOString(),
+      });
+    } catch(e) {
+      console.warn("[INDICATORS] Error:", e.message);
+      return json(res, 200, { error: e.message, rsi:null, ema20:null, ema50:null, signal:"HOLD", confidence:50 });
+    }
+  }
+
+  // GET /api/sparkline?symbol=EURUSD&interval=1h&bars=24
+  // Returns last N OHLCV bars for sparkline chart
+  if (req.method === "GET" && url === "/api/sparkline") {
+    try {
+      const qs = new URL(req.url, "http://localhost").searchParams;
+      const sym = (qs.get("symbol") || "").toUpperCase();
+      const interval = qs.get("interval") || "1h";
+      const bars = Math.min(100, parseInt(qs.get("bars") || "24"));
+      const TD_KEY = process.env.TWELVE_DATA_KEY || "";
+      if (!sym || !TD_KEY) return json(res, 200, { candles: [] });
+
+      const TD_MAP = {
+        "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
+        "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","GBPJPY":"GBP/JPY",
+        "EURJPY":"EUR/JPY","EURGBP":"EUR/GBP","XAUUSD":"XAU/USD","XAGUSD":"XAG/USD",
+        "BTCUSD":"BTC/USD","ETHUSD":"ETH/USD","SOLUSD":"SOL/USD","BNBUSD":"BNB/USD",
+        "NAS100":"NDX","SPX500":"SPX","US30":"DJI","USOIL":"WTI",
+      };
+      const tdSym = encodeURIComponent(TD_MAP[sym] || sym);
+
+      const https = require("https");
+      await new Promise((resolve, reject) => {
+        const path = `/time_series?symbol=${tdSym}&interval=${interval}&outputsize=${bars}&apikey=${TD_KEY}&dp=5`;
+        const r = https.request({ hostname:"api.twelvedata.com", path, method:"GET", timeout:12000,
+          headers:{"User-Agent":"TradeLedger/1.0","Accept":"application/json"}
+        }, resp => {
+          let d = "";
+          resp.on("data", c => d += c);
+          resp.on("end", () => {
+            try {
+              const parsed = JSON.parse(d);
+              if (parsed.status === "error" || parsed.code || !parsed.values) {
+                resolve(json(res, 200, { candles: [], error: parsed.message || "No data" }));
+              } else {
+                const candles = parsed.values.reverse().map(v => ({
+                  t: v.datetime,
+                  o: parseFloat(v.open),
+                  h: parseFloat(v.high),
+                  l: parseFloat(v.low),
+                  c: parseFloat(v.close),
+                  v: parseFloat(v.volume || 0),
+                }));
+                resolve(json(res, 200, { symbol: sym, interval, candles }));
+              }
+            } catch(e) { resolve(json(res, 500, { candles: [], error: e.message })); }
+          });
+        });
+        r.on("error", e => resolve(json(res, 500, { candles: [], error: e.message })));
+        r.on("timeout", () => { r.destroy(); resolve(json(res, 200, { candles: [] })); });
+        r.end();
+      });
+      return;
+    } catch(e) {
+      console.warn("[SPARKLINE] Error:", e.message);
+      return json(res, 200, { candles: [] });
+    }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
