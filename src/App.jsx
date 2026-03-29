@@ -35,6 +35,11 @@ let T = {...LIGHT};
 function parseMT5Date(s){if(!s)return null;const d=new Date(String(s).replace(/\./g,"-").replace(" ","T"));return isNaN(d.getTime())?null:d;}
 function mt5Day(s){const d=parseMT5Date(s);return d?d.toISOString().slice(0,10):null;}
 function mt5Hour(s){const d=parseMT5Date(s);return d?d.getUTCHours():null;}
+// localDay() — always returns YYYY-MM-DD in the user's LOCAL timezone (fixes UTC off-by-one)
+function localDay(d=new Date()){
+  const dt=d instanceof Date?d:new Date(d);
+  return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
+}
 
 async function fetchPriceBatch(symbols,{onCachedHit}={}){
   try{const raw=localStorage.getItem(PRICE_CACHE_KEY);if(raw){const c=JSON.parse(raw);if(Date.now()-(c.savedAt||0)<PRICE_CACHE_TTL&&symbols.every(s=>c.quotes?.[s]!==undefined)&&onCachedHit)onCachedHit(c.quotes);}}catch{}
@@ -175,23 +180,23 @@ function KpiCard({label,value,sub,color}){
 
 // ── DASHBOARD ────────────────────────────────────────────────
 function DashboardTab({trades,stats,serverOk,lastSync}){
-  const todayStr=new Date().toISOString().slice(0,10);
+  const todayStr=localDay();
   const [period,setPeriod]=useState("all");
   const periods=[{k:"today",l:"Today"},{k:"yesterday",l:"Yesterday"},{k:"week",l:"This Week"},{k:"lastweek",l:"Last Week"},{k:"month",l:"This Month"},{k:"lastmonth",l:"Last Month"},{k:"year",l:"This Year"},{k:"all",l:"All Time"}];
 
   const filteredTrades=useMemo(()=>{
     // mt5Day() already normalises "2024.03.15 14:22" → "2024-03-15" via parseMT5Date
     const getDay=t=>mt5Day(t.closeTime)||mt5Day(t.openTime)||"";
-    const weekAgo=new Date(Date.now()-7*86400000).toISOString().slice(0,10);
-    const monthAgo=new Date(Date.now()-30*86400000).toISOString().slice(0,10);
-    const ydStr=new Date(Date.now()-86400000).toISOString().slice(0,10);
+    const weekAgo=localDay(new Date(Date.now()-7*86400000));
+    const monthAgo=localDay(new Date(Date.now()-30*86400000));
+    const ydStr=localDay(new Date(Date.now()-86400000));
     if(period==="today")return trades.filter(t=>getDay(t)===todayStr);
     if(period==="yesterday")return trades.filter(t=>getDay(t)===ydStr);
     if(period==="week")return trades.filter(t=>getDay(t)>=weekAgo);
-    if(period==="lastweek"){const s=new Date(Date.now()-14*86400000).toISOString().slice(0,10);return trades.filter(t=>{const d=getDay(t);return d>=s&&d<weekAgo;});}
+    if(period==="lastweek"){const s=localDay(new Date(Date.now()-14*86400000));return trades.filter(t=>{const d=getDay(t);return d>=s&&d<weekAgo;});}
     if(period==="month")return trades.filter(t=>getDay(t)>=monthAgo);
-    if(period==="lastmonth"){const s=new Date(Date.now()-60*86400000).toISOString().slice(0,10);return trades.filter(t=>{const d=getDay(t);return d>=s&&d<monthAgo;});}
-    if(period==="year"){const y=new Date();y.setFullYear(y.getFullYear()-1);return trades.filter(t=>getDay(t)>=y.toISOString().slice(0,10));}
+    if(period==="lastmonth"){const s=localDay(new Date(Date.now()-60*86400000));return trades.filter(t=>{const d=getDay(t);return d>=s&&d<monthAgo;});}
+    if(period==="year"){const y=new Date();y.setFullYear(y.getFullYear()-1);return trades.filter(t=>getDay(t)>=localDay(y));}
     return trades;
   },[trades,period,todayStr]);
 
@@ -489,7 +494,7 @@ function DashboardTab({trades,stats,serverOk,lastSync}){
                 <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:3}}>
                   {days.map((day,i)=>{
                     if(!day)return <div key={i}/>;
-                    const dStr=day.toISOString().slice(0,10);
+                    const dStr=localDay(day);
                     const td=tradesByDay[dStr];
                     const isToday=dStr===todayStr;
                     const isWe=day.getDay()===0||day.getDay()===6;
@@ -1139,7 +1144,7 @@ function exportCSV(trades){
   });
   const csv=rows.map(r=>r.map(v=>JSON.stringify(v||"")).join(",")).join("\n");
   const blob=new Blob([csv],{type:"text/csv"});
-  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="tradeledger-export-"+new Date().toISOString().slice(0,10)+".csv";a.click();
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download="tradeledger-export-"+localDay()+".csv";a.click();
 }
 
 function AnalyticsTab({trades,stats,weeklyAI,genWeeklyAI}){
@@ -1546,7 +1551,7 @@ function CalendarTab({trades,todayNews}){
     tradesByDay[d].trades.push(t);
   });
 
-  const todayStr=new Date().toISOString().slice(0,10);
+  const todayStr=localDay();
   const selectedData=selectedDay?tradesByDay[selectedDay]:null;
 
   return (
@@ -1606,7 +1611,7 @@ function CalendarTab({trades,todayNews}){
           <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:4}}>
             {days.map((day,i)=>{
               if(!day)return <div key={i}/>;
-              const dStr=day.toISOString().slice(0,10);
+              const dStr=localDay(day);
               const td=tradesByDay[dStr];
               const isToday=dStr===todayStr;
               const isSelected=dStr===selectedDay;
@@ -1654,7 +1659,7 @@ function CalendarTab({trades,todayNews}){
             return weeks.map((wk,wi)=>{
               const tradingDays=wk.filter(d=>d&&[1,2,3,4,5].includes(d.getDay()));
               let wProfit=0,wCount=0;
-              tradingDays.forEach(d=>{const k=d.toISOString().slice(0,10);if(tradesByDay[k]){wProfit+=tradesByDay[k].profit;wCount+=tradesByDay[k].count;}});
+              tradingDays.forEach(d=>{const k=localDay(d);if(tradesByDay[k]){wProfit+=tradesByDay[k].profit;wCount+=tradesByDay[k].count;}});
               if(wCount===0&&wi>0)return null;
               return (
                 <div key={wi} style={{marginBottom:12,paddingBottom:12,borderBottom:wi<weeks.length-1?"1px solid "+T.border:"none"}}>
@@ -1987,7 +1992,7 @@ function JournalTab({trades}){
 
   // Form state
   const EMPTY_FORM = {
-    date: new Date().toISOString().slice(0,10),
+    date: localDay(),
     symbol: "", type: "buy", outcome: "win",
     pnl: "", setup: "", reason: "", emotion: "",
     mistakes: "", lessons: "", rating: 3,
@@ -2393,7 +2398,7 @@ function JournalTab({trades}){
               <strong style={{color:T.red}}>{worst.emotion}</strong><span style={{color:T.red}}>↓</span>
             </div>;
           })()}
-          {trades.length>0&&<button className="btn" style={{fontSize:11}} onClick={()=>{const t=[...trades].reverse()[0];setForm(f=>({...f,symbol:t.symbol||"",type:t.type||"buy",pnl:((t.profit||0)+(t.swap||0)+(t.commission||0)).toFixed(2),outcome:(t.profit||0)>0?"win":(t.profit||0)<0?"loss":"breakeven",date:mt5Day(t.closeTime)||new Date().toISOString().slice(0,10)}));setView("new");}}>Import MT5</button>}
+          {trades.length>0&&<button className="btn" style={{fontSize:11}} onClick={()=>{const t=[...trades].reverse()[0];setForm(f=>({...f,symbol:t.symbol||"",type:t.type||"buy",pnl:((t.profit||0)+(t.swap||0)+(t.commission||0)).toFixed(2),outcome:(t.profit||0)>0?"win":(t.profit||0)<0?"loss":"breakeven",date:mt5Day(t.closeTime)||localDay()}));setView("new");}}>Import MT5</button>}
           <button className="btn btn-primary" onClick={()=>setView("new")}>+ New Entry</button>
         </div>
       </div>
@@ -3514,7 +3519,7 @@ export default function TradeLedger(){
         sourceTradeId:String(t.ticket||t.id||t.order||""),
         createdAt:new Date().toISOString(),
         auto:true, // flag as auto-created draft
-        date:mt5Day(t.closeTime)||new Date().toISOString().slice(0,10),
+        date:mt5Day(t.closeTime)||localDay(),
         symbol:t.symbol||"",
         type:(t.type||"buy").toLowerCase().includes("sell")?"sell":"buy",
         pnl:+net.toFixed(2),
@@ -3682,7 +3687,7 @@ export default function TradeLedger(){
       )}
 
       {/* Risk lock */}
-      {!riskLockDismissed&&riskLimit&&(()=>{const tp=trades.filter(t=>(t.closeTime||"").slice(0,10)===new Date().toISOString().slice(0,10)).reduce((s,t)=>s+(t.profit||0)+(t.swap||0)+(t.commission||0),0);if(tp>-Math.abs(riskLimit))return null;return<div style={{position:"fixed",inset:0,zIndex:9999,background:"rgba(255,255,255,.95)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}><div style={{fontSize:32,fontWeight:800,color:T.red,marginBottom:16}}>RISK LOCK</div><div style={{fontSize:16,color:T.textSub,marginBottom:8}}>Today P&L: <span style={{color:T.red,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>${tp.toFixed(2)}</span></div><div style={{fontSize:13,color:T.textDim,marginBottom:28,textAlign:"center",maxWidth:320}}>Daily risk limit of ${Math.abs(riskLimit)} hit. Stop trading for today.</div><div style={{display:"flex",gap:10}}><button className="btn" onClick={()=>setTab("setup")}>Edit Limit</button><button className="btn btn-primary" style={{background:T.red,borderColor:T.red}} onClick={()=>setRiskLockDismissed(true)}>I Understand</button></div></div>;})()} 
+      {!riskLockDismissed&&riskLimit&&(()=>{const tp=trades.filter(t=>mt5Day(t.closeTime)===localDay()).reduce((s,t)=>s+(t.profit||0)+(t.swap||0)+(t.commission||0),0);if(tp>-Math.abs(riskLimit))return null;return<div style={{position:"fixed",inset:0,zIndex:9999,background:"rgba(255,255,255,.95)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",padding:24}}><div style={{fontSize:32,fontWeight:800,color:T.red,marginBottom:16}}>RISK LOCK</div><div style={{fontSize:16,color:T.textSub,marginBottom:8}}>Today P&L: <span style={{color:T.red,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>${tp.toFixed(2)}</span></div><div style={{fontSize:13,color:T.textDim,marginBottom:28,textAlign:"center",maxWidth:320}}>Daily risk limit of ${Math.abs(riskLimit)} hit. Stop trading for today.</div><div style={{display:"flex",gap:10}}><button className="btn" onClick={()=>setTab("setup")}>Edit Limit</button><button className="btn btn-primary" style={{background:T.red,borderColor:T.red}} onClick={()=>setRiskLockDismissed(true)}>I Understand</button></div></div>;})()} 
 
       {/* Checklist */}
       {checklistOpen&&(
@@ -3754,7 +3759,7 @@ export default function TradeLedger(){
               {sessions.map(s=><div key={s.name} style={{display:"flex",alignItems:"center",gap:6,padding:"2px 6px",opacity:s.active?1:0.35}}><div style={{width:4,height:4,borderRadius:"50%",background:s.active?s.color:T.textDim,flexShrink:0}}/><span style={{fontSize:9,color:s.active?T.textSub:T.textDim,whiteSpace:"nowrap"}}>{s.name}</span></div>)}
               <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:T.textDim,fontFamily:"'JetBrains Mono',monospace",padding:"4px 6px",marginTop:4}}><span>{utcStr}</span><span>{localStr}</span></div>
               {(()=>{
-                const todayStr=new Date().toISOString().slice(0,10);
+                const todayStr=localDay();
                 const todayT=trades.filter(t=>mt5Day(t.closeTime)===todayStr);
                 const pnl=+todayT.reduce((s,t)=>s+(t.profit||0)+(t.swap||0)+(t.commission||0),0).toFixed(2);
                 if(!todayT.length)return null;
