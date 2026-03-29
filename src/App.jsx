@@ -3380,14 +3380,19 @@ function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,account
               <button className="btn btn-primary" style={{fontSize:11}} disabled={!telegramChatId||telegramTesting} onClick={async()=>{
                 setTelegramTesting(true);setTelegramStatus(null);
                 try{const r=await fetch(SERVER+"/api/telegram/test?chatId="+telegramChatId);const d=await r.json();
-                  if(d.ok){try{localStorage.setItem("tl_telegram_chat",telegramChatId);}catch{}setTelegramStatus("success");}
+                  if(d.ok){
+                    try{localStorage.setItem("tl_telegram_chat",telegramChatId);}catch{}
+                    // Also register chat ID with server scheduler for news alerts
+                    fetch(SERVER+"/api/telegram/savechat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chatId:telegramChatId})}).catch(()=>{});
+                    setTelegramStatus("success");
+                  }
                   else setTelegramStatus(d.error||"Failed");
                 }catch(e){setTelegramStatus(e.message);}
                 setTelegramTesting(false);
               }}>{telegramTesting?"Testing...":"Test & Save"}</button>
             </div>
           </div>
-          {telegramStatus==="success"&&<div style={{fontSize:12,color:T.green,fontWeight:600}}>Connected! Check your Telegram for a test message.</div>}
+          {telegramStatus==="success"&&<div style={{fontSize:12,color:T.green,fontWeight:600}}>Connected! Check your Telegram. You will now receive alerts 30 min before HIGH impact news events automatically.</div>}
           {telegramStatus&&telegramStatus!=="success"&&<div style={{fontSize:12,color:T.red}}>{telegramStatus}</div>}
           {localStorage.getItem&&localStorage.getItem("tl_telegram_chat")&&telegramStatus!=="success"&&(
             <div style={{fontSize:11,color:T.green}}>Chat ID saved: {localStorage.getItem("tl_telegram_chat")}</div>
@@ -3548,6 +3553,12 @@ export default function TradeLedger(){
   useEffect(()=>{fetchAll();},[fetchAll]);
   useEffect(()=>{const t=setInterval(fetchAll,30000);return()=>clearInterval(t);},[fetchAll]);
   useEffect(()=>{if(serverOk)connectWS();return()=>{wsRef.current?.close();clearTimeout(reconnRef.current);};},[serverOk,connectWS]);
+
+  // Register saved Telegram chat ID with server on load
+  useEffect(()=>{
+    const chatId=localStorage.getItem("tl_telegram_chat");
+    if(chatId){fetch(SERVER+"/api/telegram/savechat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({chatId})}).catch(()=>{});}
+  },[]);
 
   // Keyboard shortcuts
   useEffect(()=>{
