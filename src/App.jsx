@@ -880,6 +880,122 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
             {watchlist.length===0&&<div style={{padding:32,textAlign:"center",color:T.textDim,fontSize:12}}>Add symbols to track live prices</div>}
             {watchlist.length>0&&<div style={{padding:"6px 14px",borderTop:"1px solid "+T.border,fontSize:9,color:T.textDim,textAlign:"center",letterSpacing:"0.03em"}}>Press D·W·A·X·J·C·N·S to switch tabs</div>}
           </div>
+
+          {/* CORRELATION MATRIX */}
+          {watchlist.length>=3&&(()=>{
+            // Build correlation from recent trades by symbol
+            // Use price change % from prices prop as proxy for same-day moves
+            const syms=watchlist.slice(0,6);
+            // For each pair, compute correlation from last 30 daily changes in prices
+            // Since we only have current price, use known structural correlations as baseline
+            // then overlay with actual trade profit direction correlations
+            const KNOWN={
+              "EURUSD-GBPUSD":0.89,"EURUSD-AUDUSD":0.72,"EURUSD-NZDUSD":0.68,
+              "EURUSD-USDJPY":-0.78,"EURUSD-USDCHF":-0.92,"EURUSD-USDCAD":-0.61,
+              "GBPUSD-AUDUSD":0.65,"GBPUSD-USDJPY":-0.71,"GBPUSD-USDCHF":-0.85,
+              "USDJPY-USDCHF":0.82,"USDJPY-USDCAD":0.58,"AUDUSD-NZDUSD":0.88,
+              "XAUUSD-USDJPY":-0.45,"XAUUSD-USDCHF":-0.38,"XAUUSD-EURUSD":0.42,
+              "BTCUSD-ETHUSD":0.94,"BTCUSD-SOLUSD":0.87,"ETHUSD-SOLUSD":0.91,
+              "NAS100-SPX500":0.96,"NAS100-US30":0.88,"SPX500-US30":0.93,
+              "USOIL-USDCAD":-0.62,"USOIL-NZDUSD":0.31,
+            };
+            const getCorr=(a,b)=>{
+              const key1=a+"-"+b, key2=b+"-"+a;
+              if(a===b)return 1;
+              // Check trades for same-day correlation
+              const tradeCorr=(()=>{
+                if(!trades.length)return null;
+                const days=[...new Set(trades.map(t=>mt5Day(t.closeTime)).filter(Boolean))].slice(-30);
+                if(days.length<5)return null;
+                const seriesA=[], seriesB=[];
+                days.forEach(d=>{
+                  const ta=trades.filter(t=>mt5Day(t.closeTime)===d&&t.symbol===a);
+                  const tb=trades.filter(t=>mt5Day(t.closeTime)===d&&t.symbol===b);
+                  if(ta.length&&tb.length){
+                    seriesA.push(ta.reduce((s,t)=>s+(t.profit||0),0));
+                    seriesB.push(tb.reduce((s,t)=>s+(t.profit||0),0));
+                  }
+                });
+                if(seriesA.length<4)return null;
+                const meanA=seriesA.reduce((s,v)=>s+v,0)/seriesA.length;
+                const meanB=seriesB.reduce((s,v)=>s+v,0)/seriesB.length;
+                const num=seriesA.reduce((s,v,i)=>s+(v-meanA)*(seriesB[i]-meanB),0);
+                const denA=Math.sqrt(seriesA.reduce((s,v)=>s+(v-meanA)**2,0));
+                const denB=Math.sqrt(seriesB.reduce((s,v)=>s+(v-meanB)**2,0));
+                return(denA&&denB)?+(num/(denA*denB)).toFixed(2):null;
+              })();
+              if(tradeCorr!==null)return tradeCorr;
+              return KNOWN[key1]??KNOWN[key2]??0;
+            };
+            const corrColor=v=>{
+              if(v===1)return T.blue;
+              if(v>0.7)return T.red;
+              if(v>0.4)return T.amber;
+              if(v>-0.4)return T.green;
+              if(v>-0.7)return T.cyan;
+              return T.purple;
+            };
+            const corrBg=v=>{
+              const abs=Math.abs(v);
+              if(v===1)return"rgba(79,128,255,.2)";
+              const intensity=Math.round(abs*180);
+              return v>0?"rgba(255,91,91,"+abs*0.35+")":"rgba(0,196,140,"+abs*0.35+")";
+            };
+            return(
+              <div className="card" style={{overflow:"hidden",marginTop:0}}>
+                <div style={{padding:"11px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                  <div>
+                    <div style={{fontSize:12,fontWeight:600}}>Correlation Matrix</div>
+                    <div style={{fontSize:10,color:T.textDim,marginTop:1}}>How your symbols move together · red = correlated, green = uncorrelated</div>
+                  </div>
+                </div>
+                <div style={{padding:"12px",overflowX:"auto"}}>
+                  <table style={{borderCollapse:"collapse",fontSize:10,width:"100%"}}>
+                    <thead>
+                      <tr>
+                        <td style={{padding:"4px 6px"}}/>
+                        {syms.map(s=><th key={s} style={{padding:"4px 6px",fontWeight:700,color:T.textSub,textAlign:"center",fontFamily:"'JetBrains Mono',monospace",fontSize:9}}>{s.slice(0,6)}</th>)}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {syms.map(a=>(
+                        <tr key={a}>
+                          <th style={{padding:"4px 6px",fontWeight:700,color:T.textSub,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:9,whiteSpace:"nowrap"}}>{a.slice(0,6)}</th>
+                          {syms.map(b=>{
+                            const v=getCorr(a,b);
+                            return(
+                              <td key={b} style={{padding:"3px",textAlign:"center"}}>
+                                <div style={{width:44,height:36,borderRadius:6,background:corrBg(v),display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"default",transition:"transform .1s"}}
+                                  title={a+" vs "+b+": "+(v*100).toFixed(0)+"% correlation"}>
+                                  <div style={{fontSize:10,fontWeight:700,color:corrColor(v),fontFamily:"'JetBrains Mono',monospace"}}>{v===1?"—":(v>0?"+":"")+v.toFixed(2)}</div>
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <div style={{display:"flex",gap:12,marginTop:10,flexWrap:"wrap"}}>
+                    {[{c:T.red,l:"0.7+ Highly correlated (avoid doubling up)"},
+                      {c:T.amber,l:"0.4–0.7 Moderate correlation"},
+                      {c:T.green,l:"−0.4 to 0.4 Low correlation (diversified)"},
+                      {c:T.cyan,l:"−0.7 to −0.4 Inverse"},
+                    ].map(x=>(
+                      <div key={x.l} style={{display:"flex",alignItems:"center",gap:5}}>
+                        <div style={{width:8,height:8,borderRadius:2,background:x.c,flexShrink:0}}/>
+                        <span style={{fontSize:9,color:T.textDim}}>{x.l}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
+
+          {/* keep existing keyboard hint (already there, just close the watchlist symbol list div) */}
+          <div style={{display:"none"}}>
+          </div>
         </div>
 
         {/* Right: analysis panel */}
@@ -1160,7 +1276,7 @@ function AnalyticsTab({trades,stats,weeklyAI,genWeeklyAI}){
   const hourMap={};
   trades.forEach(t=>{const h=mt5Hour(t.openTime);if(h!==null){if(!hourMap[h])hourMap[h]={hour:h,profit:0,trades:0};hourMap[h].profit+=t.profit;hourMap[h].trades++;}});
   const hourData=Array.from({length:24},(_,h)=>({hour:h,profit:+(hourMap[h]?.profit||0).toFixed(2),trades:hourMap[h]?.trades||0}));
-  const sections=[{k:"overview",l:"Overview"},{k:"deepstats",l:"Deep Stats"},{k:"drawdown",l:"Drawdown"},{k:"monthly",l:"Monthly"},{k:"coach",l:"AI Coach"}];
+  const sections=[{k:"overview",l:"Overview"},{k:"deepstats",l:"Deep Stats"},{k:"drawdown",l:"Drawdown"},{k:"monthly",l:"Monthly"},{k:"ruin",l:"Risk of Ruin"},{k:"coach",l:"AI Coach"}];
 
   return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:8}}>
@@ -2206,6 +2322,79 @@ function JournalTab({trades}){
         </div>
         <div style={{display:"flex",gap:8}}>
           {selected.symbol&&<button className="btn" style={{fontSize:11}} onClick={()=>setJournalTvSym(selected.symbol)}>Chart</button>}
+          {selected.symbol&&selected.date&&(()=>{
+            const [replayData,setReplayData]=useState(null);
+            const [replayOpen,setReplayOpen]=useState(false);
+            const loadReplay=async()=>{
+              if(replayData){setReplayOpen(true);return;}
+              try{
+                const r=await fetch(SERVER+"/api/sparkline?symbol="+selected.symbol+"&interval=1h&bars=48");
+                if(r.ok){const d=await r.json();setReplayData(d.candles||[]);setReplayOpen(true);}
+              }catch{}
+            };
+            return(
+              <>
+                <button className="btn" style={{fontSize:11}} onClick={loadReplay}>Replay</button>
+                {replayOpen&&replayData&&replayData.length>0&&(()=>{
+                  const closes=replayData.map(c=>c.c);
+                  const minP=Math.min(...replayData.map(c=>c.l));
+                  const maxP=Math.max(...replayData.map(c=>c.h));
+                  const range=maxP-minP||1;
+                  const W=480,H=120,pad=8;
+                  const xp=i=>pad+(i/(replayData.length-1))*(W-pad*2);
+                  const yp=v=>H-pad-(v-minP)/range*(H-pad*2);
+                  // Find closest candle to entry/exit
+                  const entryPrice=parseFloat(selected.entryPrice)||null;
+                  const exitPrice=parseFloat(selected.pnl)>0?closes[closes.length-1]:null;
+                  const isWin=(selected.pnl||0)>0;
+                  const lineColor=isWin?T.green:T.red;
+                  const areaPoints=closes.map((c,i)=>xp(i)+","+yp(c)).join(" ");
+                  return(
+                    <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.7)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}} onClick={e=>{if(e.target===e.currentTarget)setReplayOpen(false);}}>
+                      <div style={{background:T.surface,borderRadius:16,border:"1px solid "+T.border,width:"min(560px,95vw)",overflow:"hidden",boxShadow:"0 32px 80px rgba(0,0,0,.4)"}}>
+                        <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                          <div>
+                            <span style={{fontSize:13,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{selected.symbol}</span>
+                            <span style={{fontSize:11,color:T.textDim,marginLeft:8}}>{selected.date} · 1H replay</span>
+                          </div>
+                          <button onClick={()=>setReplayOpen(false)} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:T.textDim}}>×</button>
+                        </div>
+                        <div style={{padding:"16px",background:T.bg}}>
+                          <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:H,display:"block",borderRadius:8}}>
+                            <defs>
+                              <linearGradient id="rg" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor={lineColor} stopOpacity="0.3"/>
+                                <stop offset="100%" stopColor={lineColor} stopOpacity="0.02"/>
+                              </linearGradient>
+                            </defs>
+                            <polygon points={"0,"+H+" "+areaPoints+" "+(W-pad)+","+H} fill="url(#rg)"/>
+                            <polyline points={areaPoints} fill="none" stroke={lineColor} strokeWidth="1.5" strokeLinejoin="round"/>
+                            {/* Current price dot */}
+                            <circle cx={xp(closes.length-1)} cy={yp(closes[closes.length-1])} r="3.5" fill={lineColor} stroke={T.surface} strokeWidth="1.5"/>
+                            {/* Price labels */}
+                            <text x={pad+2} y={yp(maxP)-4} fontSize="8" fill={T.textDim}>${maxP.toFixed(maxP>100?2:5)}</text>
+                            <text x={pad+2} y={yp(minP)+12} fontSize="8" fill={T.textDim}>${minP.toFixed(minP>100?2:5)}</text>
+                          </svg>
+                          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:8,marginTop:12}}>
+                            {[
+                              {l:"Outcome",v:(selected.pnl>0?"WIN":"LOSS"),c:isWin?T.green:T.red},
+                              {l:"P&L",v:(selected.pnl>0?"+":"")+selected.pnl,c:isWin?T.green:T.red},
+                              {l:"Symbol",v:selected.symbol,c:T.blue},
+                            ].map(x=>(
+                              <div key={x.l} style={{background:T.surface,borderRadius:8,padding:"8px 10px",textAlign:"center"}}>
+                                <div style={{fontSize:9,color:T.textDim,textTransform:"uppercase",marginBottom:3}}>{x.l}</div>
+                                <div style={{fontSize:13,fontWeight:700,color:x.c,fontFamily:"'JetBrains Mono',monospace"}}>{x.v}</div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </>
+            );
+          })()}
           {selected.needsReview&&!selected.reviewed&&(
             <button className="btn btn-primary" style={{fontSize:11,background:T.green,borderColor:T.green}} onClick={()=>{
               const updated=entries.map(e=>e.id===selected.id?{...e,reviewed:true,needsReview:false}:e);
@@ -3504,14 +3693,15 @@ export default function TradeLedger(){
   const [lastSync,setLastSync]=useState(null);
   const [sideOpen,setSideOpen]=useState(true);
   const [dark,setDark]=useState(()=>{try{return localStorage.getItem("tl_dark")==="1";}catch{return false;}});
+  // Apply T immediately on first render so colours are correct before paint
+  useMemo(()=>{ T=dark?{...DARK}:{...LIGHT}; },[dark]);
   // Multi-account support
   const [accounts,setAccounts]=useState(()=>{try{return JSON.parse(localStorage.getItem("tl_accounts")||"null")||[{id:"default",label:"Main Account",token:"TL-S7PDZ3UV",trades:[]}];}catch{return [{id:"default",label:"Main Account",token:"TL-S7PDZ3UV",trades:[]}];}});
   const [activeAccount,setActiveAccount]=useState(()=>{try{return localStorage.getItem("tl_active_account")||"default";}catch{return "default";}});
   // Goals
   const [goals,setGoals]=useState(()=>{try{return JSON.parse(localStorage.getItem("tl_goals")||"null")||{monthlyProfit:0,dailyTrades:0,winRate:0,maxDD:0};}catch{return {monthlyProfit:0,dailyTrades:0,winRate:0,maxDD:0};}});
 
-  // Apply dark mode
-  useMemo(()=>{ T=dark?{...DARK}:{...LIGHT}; },[dark]);
+
   const toggleDark=()=>{setDark(d=>{const n=!d;try{localStorage.setItem("tl_dark",n?"1":"0");}catch{}return n;});};
 
   const [watchlist,setWatchlist]=useState(()=>{try{return JSON.parse(localStorage.getItem("tl_wl")||JSON.stringify(DEFAULT_WL));}catch{return DEFAULT_WL;}});
