@@ -2462,5 +2462,55 @@ server.listen(PORT, "0.0.0.0", () => {
   setTimeout(checkPriceAlerts, 10000);
   setInterval(checkPriceAlerts, 60 * 1000);
   console.log("[PRICE-ALERT] Server-side price alert checker started");
+
+  // ── PRE-LOAD WEEK EVENTS ON BOOT ────────────────────────────────────────
+  // Fetch economic calendar immediately so Telegram news alerts work from startup
+  const preloadWeekEvents = async () => {
+    try {
+      const https = require("https");
+      const now = new Date();
+      const day = now.getUTCDay();
+      const mon = new Date(now);
+      mon.setUTCDate(now.getUTCDate() - ((day + 6) % 7));
+      mon.setUTCHours(0, 0, 0, 0);
+      const weekKey = mon.toISOString().slice(0, 10);
+      if (!global._weekCache) global._weekCache = {};
+      if (global._weekCache[weekKey]) { console.log("[BOOT] Week events already cached"); return; }
+
+      const httpGet = (u) => new Promise((resolve, reject) => {
+        const r = https.get(u, { headers:{"User-Agent":"Mozilla/5.0"}, timeout:10000 }, resp => {
+          let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>resolve({status:resp.statusCode,text:d}));
+        });
+        r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));});
+      });
+
+      const urls = [
+        "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json",
+        "https://nfs.faireconomy.media/ff_calendar_thisweek.json",
+      ];
+      for (const u of urls) {
+        try {
+          const {status,text} = await httpGet(u);
+          if (status!==200||!text||text.includes("<!DOCTYPE")) continue;
+          const arr = JSON.parse(text);
+          if (!Array.isArray(arr)||!arr.length) continue;
+          const events = arr.map(e=>({
+            date:e.date||"", currency:e.country||e.currency||"",
+            name:e.title||e.name||"", impact:(e.impact||"").toLowerCase(),
+            actual:e.actual!=null?String(e.actual):null,
+            forecast:e.forecast!=null?String(e.forecast):null,
+            previous:e.previous!=null?String(e.previous):null,
+          })).sort((a,b)=>(a.date||"").localeCompare(b.date||""));
+          global._weekCache[weekKey] = { events, ts: Date.now() };
+          console.log("[BOOT] Pre-loaded", events.length, "week events for news alerts");
+          return;
+        } catch(e) { console.warn("[BOOT] ForexFactory fetch failed:", e.message); }
+      }
+      console.warn("[BOOT] Could not pre-load week events — news Telegram alerts may be delayed");
+    } catch(e) { console.warn("[BOOT] preloadWeekEvents error:", e.message); }
+  };
+  setTimeout(preloadWeekEvents, 3000);
+  // Refresh every 12 hours
+  setInterval(preloadWeekEvents, 12 * 60 * 60 * 1000);
 });
 
