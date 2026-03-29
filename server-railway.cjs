@@ -1964,6 +1964,41 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
     } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
   }
 
+
+  // ── SERVER-SIDE PRICE ALERTS ─────────────────────────────────────────────
+  // GET /api/price-alerts — list all active alerts
+  if (req.method === "GET" && url === "/api/price-alerts") {
+    return json(res, 200, { alerts: global._priceAlerts || [] });
+  }
+
+  // POST /api/price-alerts — add a new alert
+  if (req.method === "POST" && url === "/api/price-alerts") {
+    try {
+      const body = await new Promise(resolve => { let d=""; req.on("data",c=>d+=c); req.on("end",()=>{ try{resolve(JSON.parse(d));}catch{resolve({});} }); });
+      const { sym, price, dir, chatId } = body;
+      if (!sym || !price || !dir) return json(res, 400, { error: "sym, price, dir required" });
+      if (!global._priceAlerts) global._priceAlerts = [];
+      const alert = { id: Date.now().toString(), sym: sym.toUpperCase(), price: parseFloat(price), dir, chatId: chatId||global._telegramChatId||process.env.TELEGRAM_CHAT_ID||"", triggered: false, createdAt: new Date().toISOString() };
+      global._priceAlerts.push(alert);
+      console.log("[PRICE-ALERT] Added:", alert.sym, alert.dir, alert.price);
+      return json(res, 200, { ok: true, alert });
+    } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
+  }
+
+  // DELETE /api/price-alerts/:id — remove an alert
+  if (req.method === "DELETE" && url.startsWith("/api/price-alerts/")) {
+    const id = url.split("/").pop();
+    if (!global._priceAlerts) global._priceAlerts = [];
+    global._priceAlerts = global._priceAlerts.filter(a => a.id !== id);
+    return json(res, 200, { ok: true });
+  }
+
+  // POST /api/price-alerts/clear — clear all alerts
+  if (req.method === "POST" && url === "/api/price-alerts/clear") {
+    global._priceAlerts = [];
+    return json(res, 200, { ok: true });
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
@@ -2072,5 +2107,104 @@ server.listen(PORT, "0.0.0.0", () => {
   setTimeout(checkHighImpactEvents, 5000);
   setInterval(checkHighImpactEvents, 60 * 1000);
   console.log("[TELEGRAM] High-impact news scheduler started (checks every 60s)");
+
+  // ── SERVER-SIDE PRICE ALERT CHECKER ─────────────────────────────────────
+  // Checks every 60s, sends Telegram when price crosses alert level
+  const checkPriceAlerts = async () => {
+    if (!global._priceAlerts || !global._priceAlerts.length) return;
+    const bot = process.env.TELEGRAM_BOT_TOKEN || "";
+    if (!bot) return;
+
+    const https = require("https");
+    const activeAlerts = global._priceAlerts.filter(a => !a.triggered);
+    if (!activeAlerts.length) return;
+
+    // Get unique symbols needed
+    const symbols = [...new Set(activeAlerts.map(a => a.sym))];
+
+    // Fetch live prices from Twelve Data
+    const TD_KEY = process.env.TWELVE_DATA_KEY || "";
+    if (!TD_KEY) return;
+
+    const TD_MAP = {
+      "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
+      "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","GBPJPY":"GBP/JPY",
+      "XAUUSD":"XAU/USD","XAGUSD":"XAG/USD","BTCUSD":"BTC/USD","ETHUSD":"ETH/USD",
+      "SOLUSD":"SOL/USD","BNBUSD":"BNB/USD","NAS100":"NDX","SPX500":"SPX",
+      "US30":"DJI","USOIL":"WTI","EURUSD":"EUR/USD",
+    };
+
+    try {
+      const tdSyms = symbols.map(s => TD_MAP[s] || s).join(",");
+      const prices = await new Promise((resolve, reject) => {
+        const r = https.request({
+          hostname: "api.twelvedata.com",
+          path: "/price?symbol=" + encodeURIComponent(tdSyms) + "&apikey=" + TD_KEY + "&dp=5",
+          method: "GET", timeout: 10000,
+          headers: { "User-Agent": "TradeLedger/1.0", "Accept": "application/json" }
+        }, resp => {
+          let d = ""; resp.on("data", c => d += c);
+          resp.on("end", () => { try{resolve(JSON.parse(d));}catch{resolve({});} });
+        });
+        r.on("error", reject);
+        r.on("timeout", () => { r.destroy(); reject(new Error("timeout")); });
+        r.end();
+      });
+
+      // Check each alert
+      activeAlerts.forEach(alert => {
+        const tdSym = TD_MAP[alert.sym] || alert.sym;
+        // Twelve Data returns nested object for multiple symbols
+        const priceData = symbols.length === 1 ? prices : prices[tdSym];
+        const curPrice = parseFloat(priceData?.price);
+        if (!curPrice || isNaN(curPrice)) return;
+
+        const hit = (alert.dir === "above" && curPrice >= alert.price) ||
+                    (alert.dir === "below" && curPrice <= alert.price);
+
+        if (!hit) return;
+
+        // Mark as triggered
+        alert.triggered = true;
+        alert.triggeredAt = new Date().toISOString();
+        alert.triggeredPrice = curPrice;
+        console.log("[PRICE-ALERT] Triggered:", alert.sym, alert.dir, alert.price, "current:", curPrice);
+
+        // Send Telegram
+        const chatId = alert.chatId || global._telegramChatId || process.env.TELEGRAM_CHAT_ID || "";
+        if (!chatId) return;
+
+        const dirEmoji = alert.dir === "above" ? "↑" : "↓";
+        const msg = [
+          "<b>TradeLedger Price Alert</b>",
+          "",
+          dirEmoji + " <b>" + alert.sym + "</b> is " + alert.dir + " $" + alert.price,
+          "Current price: <b>$" + curPrice.toFixed(alert.sym.includes("USD") && !alert.sym.includes("JPY") ? 5 : 2) + "</b>",
+          "",
+          "Alert set at: $" + alert.price,
+          "Triggered: " + new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC",
+        ].join("
+");
+
+        const payload = JSON.stringify({ chat_id: chatId, text: msg, parse_mode: "HTML" });
+        const r = https.request({
+          hostname: "api.telegram.org",
+          path: `/bot${bot}/sendMessage`,
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+        }, resp => { resp.resume(); });
+        r.on("error", e => console.warn("[PRICE-ALERT] Telegram error:", e.message));
+        r.write(payload); r.end();
+      });
+
+    } catch(e) {
+      console.warn("[PRICE-ALERT] Checker error:", e.message);
+    }
+  };
+
+  // Start price alert checker — every 60 seconds
+  setTimeout(checkPriceAlerts, 10000);
+  setInterval(checkPriceAlerts, 60 * 1000);
+  console.log("[PRICE-ALERT] Server-side price alert checker started");
 });
 
