@@ -881,124 +881,9 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
             {watchlist.length>0&&<div style={{padding:"6px 14px",borderTop:"1px solid "+T.border,fontSize:9,color:T.textDim,textAlign:"center",letterSpacing:"0.03em"}}>Press D·W·A·X·J·C·N·S to switch tabs</div>}
           </div>
 
-          {/* CORRELATION MATRIX */}
-          {watchlist.length>=3&&(()=>{
-            // Build correlation from recent trades by symbol
-            // Use price change % from prices prop as proxy for same-day moves
-            const syms=watchlist.slice(0,6);
-            // For each pair, compute correlation from last 30 daily changes in prices
-            // Since we only have current price, use known structural correlations as baseline
-            // then overlay with actual trade profit direction correlations
-            const KNOWN={
-              "EURUSD-GBPUSD":0.89,"EURUSD-AUDUSD":0.72,"EURUSD-NZDUSD":0.68,
-              "EURUSD-USDJPY":-0.78,"EURUSD-USDCHF":-0.92,"EURUSD-USDCAD":-0.61,
-              "GBPUSD-AUDUSD":0.65,"GBPUSD-USDJPY":-0.71,"GBPUSD-USDCHF":-0.85,
-              "USDJPY-USDCHF":0.82,"USDJPY-USDCAD":0.58,"AUDUSD-NZDUSD":0.88,
-              "XAUUSD-USDJPY":-0.45,"XAUUSD-USDCHF":-0.38,"XAUUSD-EURUSD":0.42,
-              "BTCUSD-ETHUSD":0.94,"BTCUSD-SOLUSD":0.87,"ETHUSD-SOLUSD":0.91,
-              "NAS100-SPX500":0.96,"NAS100-US30":0.88,"SPX500-US30":0.93,
-              "USOIL-USDCAD":-0.62,"USOIL-NZDUSD":0.31,
-            };
-            const getCorr=(a,b)=>{
-              const key1=a+"-"+b, key2=b+"-"+a;
-              if(a===b)return 1;
-              // Check trades for same-day correlation
-              const tradeCorr=(()=>{
-                if(!trades.length)return null;
-                const days=[...new Set(trades.map(t=>mt5Day(t.closeTime)).filter(Boolean))].slice(-30);
-                if(days.length<5)return null;
-                const seriesA=[], seriesB=[];
-                days.forEach(d=>{
-                  const ta=trades.filter(t=>mt5Day(t.closeTime)===d&&t.symbol===a);
-                  const tb=trades.filter(t=>mt5Day(t.closeTime)===d&&t.symbol===b);
-                  if(ta.length&&tb.length){
-                    seriesA.push(ta.reduce((s,t)=>s+(t.profit||0),0));
-                    seriesB.push(tb.reduce((s,t)=>s+(t.profit||0),0));
-                  }
-                });
-                if(seriesA.length<4)return null;
-                const meanA=seriesA.reduce((s,v)=>s+v,0)/seriesA.length;
-                const meanB=seriesB.reduce((s,v)=>s+v,0)/seriesB.length;
-                const num=seriesA.reduce((s,v,i)=>s+(v-meanA)*(seriesB[i]-meanB),0);
-                const denA=Math.sqrt(seriesA.reduce((s,v)=>s+(v-meanA)**2,0));
-                const denB=Math.sqrt(seriesB.reduce((s,v)=>s+(v-meanB)**2,0));
-                return(denA&&denB)?+(num/(denA*denB)).toFixed(2):null;
-              })();
-              if(tradeCorr!==null)return tradeCorr;
-              return KNOWN[key1]??KNOWN[key2]??0;
-            };
-            const corrColor=v=>{
-              if(v===1)return T.blue;
-              if(v>0.7)return T.red;
-              if(v>0.4)return T.amber;
-              if(v>-0.4)return T.green;
-              if(v>-0.7)return T.cyan;
-              return T.purple;
-            };
-            const corrBg=v=>{
-              const abs=Math.abs(v);
-              if(v===1)return"rgba(79,128,255,.2)";
-              const intensity=Math.round(abs*180);
-              return v>0?"rgba(255,91,91,"+abs*0.35+")":"rgba(0,196,140,"+abs*0.35+")";
-            };
-            return(
-              <div className="card" style={{overflow:"hidden",marginTop:0}}>
-                <div style={{padding:"11px 14px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-                  <div>
-                    <div style={{fontSize:12,fontWeight:600}}>Correlation Matrix</div>
-                    <div style={{fontSize:10,color:T.textDim,marginTop:1}}>How your symbols move together · red = correlated, green = uncorrelated</div>
-                  </div>
-                </div>
-                <div style={{padding:"12px",overflowX:"auto"}}>
-                  <table style={{borderCollapse:"collapse",fontSize:10,width:"100%"}}>
-                    <thead>
-                      <tr>
-                        <td style={{padding:"4px 6px"}}/>
-                        {syms.map(s=><th key={s} style={{padding:"4px 6px",fontWeight:700,color:T.textSub,textAlign:"center",fontFamily:"'JetBrains Mono',monospace",fontSize:9}}>{s.slice(0,6)}</th>)}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {syms.map(a=>(
-                        <tr key={a}>
-                          <th style={{padding:"4px 6px",fontWeight:700,color:T.textSub,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:9,whiteSpace:"nowrap"}}>{a.slice(0,6)}</th>
-                          {syms.map(b=>{
-                            const v=getCorr(a,b);
-                            return(
-                              <td key={b} style={{padding:"3px",textAlign:"center"}}>
-                                <div style={{width:44,height:36,borderRadius:6,background:corrBg(v),display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",cursor:"default",transition:"transform .1s"}}
-                                  title={a+" vs "+b+": "+(v*100).toFixed(0)+"% correlation"}>
-                                  <div style={{fontSize:10,fontWeight:700,color:corrColor(v),fontFamily:"'JetBrains Mono',monospace"}}>{v===1?"—":(v>0?"+":"")+v.toFixed(2)}</div>
-                                </div>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                  <div style={{display:"flex",gap:12,marginTop:10,flexWrap:"wrap"}}>
-                    {[{c:T.red,l:"0.7+ Highly correlated (avoid doubling up)"},
-                      {c:T.amber,l:"0.4–0.7 Moderate correlation"},
-                      {c:T.green,l:"−0.4 to 0.4 Low correlation (diversified)"},
-                      {c:T.cyan,l:"−0.7 to −0.4 Inverse"},
-                    ].map(x=>(
-                      <div key={x.l} style={{display:"flex",alignItems:"center",gap:5}}>
-                        <div style={{width:8,height:8,borderRadius:2,background:x.c,flexShrink:0}}/>
-                        <span style={{fontSize:9,color:T.textDim}}>{x.l}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* keep existing keyboard hint (already there, just close the watchlist symbol list div) */}
-          <div style={{display:"none"}}>
-          </div>
         </div>
 
-        {/* Right: analysis panel */}
+        {/* Right: analysis panel + correlation matrix below */}
         <div style={{display:"flex",flexDirection:"column",gap:12}}>
           {selectedSym?(()=>{
             const a=analyseSymbol(selectedSym);
@@ -1162,6 +1047,81 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
               </div>
             </div>
           )}
+
+          {/* CORRELATION MATRIX — lives in right column, below analysis */}
+          {watchlist.length>=3&&(()=>{
+            const syms=watchlist.slice(0,6);
+            const KNOWN={
+              "EURUSD-GBPUSD":0.89,"EURUSD-AUDUSD":0.72,"EURUSD-NZDUSD":0.68,
+              "EURUSD-USDJPY":-0.78,"EURUSD-USDCHF":-0.92,"EURUSD-USDCAD":-0.61,
+              "GBPUSD-AUDUSD":0.65,"GBPUSD-USDJPY":-0.71,"GBPUSD-USDCHF":-0.85,
+              "USDJPY-USDCHF":0.82,"USDJPY-USDCAD":0.58,"AUDUSD-NZDUSD":0.88,
+              "XAUUSD-USDJPY":-0.45,"XAUUSD-USDCHF":-0.38,"XAUUSD-EURUSD":0.42,
+              "BTCUSD-ETHUSD":0.94,"BTCUSD-SOLUSD":0.87,"ETHUSD-SOLUSD":0.91,
+              "NAS100-SPX500":0.96,"NAS100-US30":0.88,"SPX500-US30":0.93,
+              "USOIL-USDCAD":-0.62,"USOIL-NZDUSD":0.31,
+            };
+            const getCorr=(a,b)=>{
+              if(a===b)return 1;
+              const key1=a+"-"+b,key2=b+"-"+a;
+              if(!trades.length)return KNOWN[key1]??KNOWN[key2]??0;
+              const days=[...new Set(trades.map(t=>mt5Day(t.closeTime)).filter(Boolean))].slice(-30);
+              if(days.length<5)return KNOWN[key1]??KNOWN[key2]??0;
+              const sA=[],sB=[];
+              days.forEach(d=>{
+                const ta=trades.filter(t=>mt5Day(t.closeTime)===d&&t.symbol===a);
+                const tb=trades.filter(t=>mt5Day(t.closeTime)===d&&t.symbol===b);
+                if(ta.length&&tb.length){sA.push(ta.reduce((s,t)=>s+(t.profit||0),0));sB.push(tb.reduce((s,t)=>s+(t.profit||0),0));}
+              });
+              if(sA.length<4)return KNOWN[key1]??KNOWN[key2]??0;
+              const mA=sA.reduce((s,v)=>s+v,0)/sA.length,mB=sB.reduce((s,v)=>s+v,0)/sB.length;
+              const num=sA.reduce((s,v,i)=>s+(v-mA)*(sB[i]-mB),0);
+              const dA=Math.sqrt(sA.reduce((s,v)=>s+(v-mA)**2,0)),dB=Math.sqrt(sB.reduce((s,v)=>s+(v-mB)**2,0));
+              return(dA&&dB)?+(num/(dA*dB)).toFixed(2):(KNOWN[key1]??KNOWN[key2]??0);
+            };
+            const cColor=v=>v===1?T.blue:v>0.7?T.red:v>0.4?T.amber:v>-0.4?T.green:v>-0.7?T.cyan:T.purple;
+            const cBg=v=>v===1?"rgba(79,128,255,.2)":v>0?"rgba(255,91,91,"+Math.abs(v)*0.35+")":"rgba(0,196,140,"+Math.abs(v)*0.35+")";
+            return(
+              <div className="card" style={{overflow:"hidden"}}>
+                <div style={{padding:"11px 14px",borderBottom:"1px solid "+T.border}}>
+                  <div style={{fontSize:12,fontWeight:600}}>Correlation Matrix</div>
+                  <div style={{fontSize:10,color:T.textDim,marginTop:1}}>Red = correlated (avoid doubling risk) · Green = diversified</div>
+                </div>
+                <div style={{padding:"10px",overflowX:"auto"}}>
+                  <table style={{borderCollapse:"collapse",fontSize:10,width:"100%"}}>
+                    <thead><tr>
+                      <td style={{padding:"3px 5px"}}/>
+                      {syms.map(s=><th key={s} style={{padding:"3px 5px",fontWeight:700,color:T.textSub,textAlign:"center",fontFamily:"'JetBrains Mono',monospace",fontSize:9}}>{s.slice(0,6)}</th>)}
+                    </tr></thead>
+                    <tbody>{syms.map(a=>(
+                      <tr key={a}>
+                        <th style={{padding:"3px 5px",fontWeight:700,color:T.textSub,textAlign:"right",fontFamily:"'JetBrains Mono',monospace",fontSize:9,whiteSpace:"nowrap"}}>{a.slice(0,6)}</th>
+                        {syms.map(b=>{
+                          const v=getCorr(a,b);
+                          return(
+                            <td key={b} style={{padding:"2px",textAlign:"center"}}>
+                              <div title={a+" vs "+b+": "+(v*100).toFixed(0)+"% correlation"}
+                                style={{width:42,height:32,borderRadius:5,background:cBg(v),display:"flex",alignItems:"center",justifyContent:"center"}}>
+                                <div style={{fontSize:9,fontWeight:700,color:cColor(v),fontFamily:"'JetBrains Mono',monospace"}}>{v===1?"—":(v>0?"+":"")+v.toFixed(2)}</div>
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}</tbody>
+                  </table>
+                  <div style={{display:"flex",gap:10,marginTop:8,flexWrap:"wrap"}}>
+                    {[{c:T.red,l:"0.7+ Correlated"},{c:T.amber,l:"0.4–0.7 Moderate"},{c:T.green,l:"Low / Diversified"},{c:T.cyan,l:"Inverse"}].map(x=>(
+                      <div key={x.l} style={{display:"flex",alignItems:"center",gap:4}}>
+                        <div style={{width:7,height:7,borderRadius:2,background:x.c,flexShrink:0}}/>
+                        <span style={{fontSize:9,color:T.textDim}}>{x.l}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
     </div>
