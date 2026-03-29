@@ -1713,9 +1713,21 @@ function CalendarTab({trades,todayNews}){
             </div>
           )}
 
-          {/* Economic events — grouped by impact with full names and times */}
-          {todayNews.length>0&&(()=>{
-            const grouped={high:todayNews.filter(e=>(e.impact||"").toLowerCase()==="high"),medium:todayNews.filter(e=>(e.impact||"").toLowerCase()==="medium"),low:todayNews.filter(e=>!["high","medium"].includes((e.impact||"").toLowerCase()))};
+          {/* Economic events — grouped by impact for SELECTED day */}
+          {(()=>{
+            // Show events for the selected day, falling back to today
+            const targetDay=selectedDay||localDay();
+            // Filter from the full week feed stored on window, or fall back to todayNews
+            const weekEvents=(typeof window!=="undefined"&&window._weekEvents)||todayNews;
+            const dayEvents=weekEvents.filter(e=>{
+              const evtDate=e.date||e.time||e.datetime||"";
+              if(!evtDate)return false;
+              try{return localDay(new Date(evtDate))===targetDay;}catch{return false;}
+            });
+            // If no week events cached, just show todayNews when viewing today
+            const eventsToShow=dayEvents.length>0?dayEvents:(targetDay===localDay()?todayNews:[]);
+            if(!eventsToShow.length)return null;
+            const grouped={high:eventsToShow.filter(e=>(e.impact||"").toLowerCase()==="high"),medium:eventsToShow.filter(e=>(e.impact||"").toLowerCase()==="medium"),low:eventsToShow.filter(e=>!["high","medium"].includes((e.impact||"").toLowerCase()))};
             const fmtTime=e=>{const d=e.date||e.time;if(!d)return"";try{const t=new Date(d);return isNaN(t)?"":" · "+t.toLocaleTimeString([],{hour:"2-digit",minute:"2-digit"});}catch{return"";}};
             const rowBg=imp=>imp==="high"?T.redBg:imp==="medium"?T.amberBg:T.bg;
             const rowBorder=imp=>imp==="high"?T.redBorder:imp==="medium"?"rgba(245,158,11,.2)":T.border;
@@ -1748,7 +1760,7 @@ function CalendarTab({trades,todayNews}){
                   <div style={{display:"flex",gap:8,alignItems:"center"}}>
                     {grouped.high.length>0&&<span style={{fontSize:10,color:T.red,fontWeight:700,background:T.redBg,border:"1px solid "+T.redBorder,borderRadius:5,padding:"1px 6px"}}>{grouped.high.length} HIGH</span>}
                     {grouped.medium.length>0&&<span style={{fontSize:10,color:T.amber,fontWeight:700,background:T.amberBg,border:"1px solid rgba(245,158,11,.25)",borderRadius:5,padding:"1px 6px"}}>{grouped.medium.length} MED</span>}
-                    <span style={{fontSize:11,color:T.textDim}}>{todayNews.length} total</span>
+                    <span style={{fontSize:11,color:T.textDim}}>{eventsToShow.length} events</span>
                   </div>
                 </div>
                 {grouped.high.length>0&&<>
@@ -3595,7 +3607,21 @@ export default function TradeLedger(){
 
   // Calendar events
   useEffect(()=>{
-    const load=async()=>{try{const r=await fetch(SERVER+"/api/week-events",{signal:AbortSignal.timeout(20000)});if(r.ok){const d=await r.json();setTodayNews(d.events||[]);}}catch{}};
+    const load=async()=>{try{const r=await fetch(SERVER+"/api/week-events",{signal:AbortSignal.timeout(20000)});if(r.ok){const d=await r.json();
+      const allEvents=d.events||[];
+      const todayStr=localDay();
+      // Filter to TODAY's events only — compare event date to local today
+      const todayOnly=allEvents.filter(e=>{
+        const evtDate=e.date||e.time||e.datetime||"";
+        if(!evtDate)return false;
+        try{return localDay(new Date(evtDate))===todayStr;}catch{return false;}
+      });
+      setTodayNews(todayOnly);
+      // Store full week events in global for the scheduler
+      global._allWeekEvents=allEvents;
+      // Also cache on window so CalendarTab can filter by any selected day
+      if(typeof window!=="undefined")window._weekEvents=allEvents;
+    }}catch{}};
     load();const t=setInterval(load,3600000);return()=>clearInterval(t);
   },[]);
 
