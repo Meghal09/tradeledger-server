@@ -1984,6 +1984,7 @@ function NewsTab({savedNews,setSavedNews,fetchNews,newsLd,openArticle,searchQuer
 // ── JOURNAL ───────────────────────────────────────────────────
 function JournalTab({trades}){
   const STORAGE_KEY = "tl_journal_entries";
+  const [journalTvSym, setJournalTvSym]=useState(null);
   const [entries, setEntries] = useState(()=>{
     try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]"); }catch{ return []; }
   });
@@ -2182,6 +2183,7 @@ function JournalTab({trades}){
 
   if(view==="detail"&&selected) return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:20}}>
+      {journalTvSym&&<TVModal symbol={journalTvSym} onClose={()=>setJournalTvSym(null)}/>}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:16}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <button className="btn" onClick={()=>{setSelected(null);setView("list");}}>Back</button>
@@ -2191,7 +2193,7 @@ function JournalTab({trades}){
           </div>
         </div>
         <div style={{display:"flex",gap:8}}>
-          {selected.symbol&&<button className="btn" style={{fontSize:11}} onClick={()=>{window.__tvSym=selected.symbol;const el=document.createElement("div");el.id="tv_quick";document.body.appendChild(el);const modal=document.createElement("div");modal.style.cssText="position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:20px";modal.innerHTML='<div style="background:#fff;border-radius:16px;width:min(1000px,95vw);height:min(640px,90vh);display:flex;flex-direction:column;overflow:hidden"><div style="padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center"><span style="font-weight:700">'+selected.symbol+' — TradingView</span><button onclick="this.closest('[data-modal]').remove()" style="background:none;border:none;font-size:22px;cursor:pointer">×</button></div><div id="tv_embed" style="flex:1"></div></div>';modal.setAttribute("data-modal","1");modal.onclick=e=>{if(e.target===modal)modal.remove();};document.body.appendChild(modal);const s=document.createElement("script");s.src="https://s3.tradingview.com/tv.js";s.onload=()=>{if(window.TradingView)new window.TradingView.widget({container_id:"tv_embed",symbol:selected.symbol.length===6?"FX:"+selected.symbol.slice(0,3)+selected.symbol.slice(3,6):selected.symbol,interval:"60",theme:"light",style:"1",locale:"en",height:"100%",width:"100%",save_image:false});};document.head.appendChild(s);}}>Chart</button>}
+          {selected.symbol&&<button className="btn" style={{fontSize:11}} onClick={()=>setJournalTvSym(selected.symbol)}>Chart</button>}
           {selected.needsReview&&!selected.reviewed&&(
             <button className="btn btn-primary" style={{fontSize:11,background:T.green,borderColor:T.green}} onClick={()=>{
               const updated=entries.map(e=>e.id===selected.id?{...e,reviewed:true,needsReview:false}:e);
