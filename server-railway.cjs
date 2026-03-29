@@ -1914,6 +1914,18 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
 
 
   // ── TELEGRAM ALERTS ──────────────────────────────────────────────────────
+  // POST /api/telegram/savechat — save chat ID so scheduler uses it
+  if (req.method === "POST" && url === "/api/telegram/savechat") {
+    try {
+      const body = await new Promise(resolve => { let d=""; req.on("data",c=>d+=c); req.on("end",()=>{ try{resolve(JSON.parse(d));}catch{resolve({});} }); });
+      const chatId = body.chatId || "";
+      if (!chatId) return json(res, 400, { error: "chatId required" });
+      global._telegramChatId = chatId;
+      console.log("[TELEGRAM] Chat ID saved for scheduler:", chatId.slice(0,3)+"***");
+      return json(res, 200, { ok: true });
+    } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
+  }
+
   if (req.method === "GET" && url === "/api/telegram/test") {
     const bot = process.env.TELEGRAM_BOT_TOKEN || "";
     const chatId = process.env.TELEGRAM_CHAT_ID || (new URL(req.url,"http://x").searchParams.get("chatId")||"");
@@ -1969,4 +1981,96 @@ server.listen(PORT, "0.0.0.0", () => {
   console.log(`\n  Set this in Railway env vars:`);
   console.log(`  TRADELEDGER_TOKEN=${APP_TOKEN}`);
   console.log(`\n  Trades loaded: ${trades.length}\n`);
+
+  // ── HIGH-IMPACT NEWS TELEGRAM SCHEDULER ─────────────────────────────────
+  // Checks every minute, sends Telegram alert 30 min before each HIGH impact event
+  const sentAlerts = new Set(); // track already-sent alerts to avoid duplicates
+
+  const sendTelegramMsg = (chatId, text) => {
+    const bot = process.env.TELEGRAM_BOT_TOKEN || "";
+    if (!bot || !chatId) return;
+    const https = require("https");
+    const payload = JSON.stringify({ chat_id: chatId, text, parse_mode: "HTML" });
+    const r = https.request({
+      hostname: "api.telegram.org",
+      path: `/bot${bot}/sendMessage`,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+    }, resp => { resp.resume(); });
+    r.on("error", e => console.warn("[TELEGRAM] Send error:", e.message));
+    r.write(payload); r.end();
+  };
+
+  const checkHighImpactEvents = async () => {
+    const bot      = process.env.TELEGRAM_BOT_TOKEN || "";
+    const chatId   = process.env.TELEGRAM_CHAT_ID || global._telegramChatId || "";
+    if (!bot || !chatId) return; // no bot configured — skip silently
+
+    try {
+      // Get events from cache if available (already loaded by week-events endpoint)
+      const weekKey = new Date().toISOString().slice(0,10).slice(0,7); // YYYY-MM
+      const cached  = global._weekCache && Object.values(global._weekCache)[0];
+      const events  = cached?.events || [];
+      if (!events.length) return;
+
+      const now      = new Date();
+      const nowMs    = now.getTime();
+      const WINDOW   = 30 * 60 * 1000; // 30 minutes in ms
+      const TOLERANCE = 60 * 1000;     // ±1 minute tolerance
+
+      events.forEach(evt => {
+        // Only HIGH impact
+        if ((evt.impact || "").toLowerCase() !== "high") return;
+
+        // Parse event time
+        const evtDate = evt.date || evt.time || evt.datetime;
+        if (!evtDate) return;
+        const evtMs = new Date(evtDate).getTime();
+        if (isNaN(evtMs)) return;
+
+        // Check if event is ~30 minutes away (within ±1 min window)
+        const diff = evtMs - nowMs;
+        if (diff < WINDOW - TOLERANCE || diff > WINDOW + TOLERANCE) return;
+
+        // Build a unique key for this event to avoid sending twice
+        const alertKey = evt.title + "|" + evtDate;
+        if (sentAlerts.has(alertKey)) return;
+        sentAlerts.add(alertKey);
+
+        // Build and send the alert
+        const evtTime   = new Date(evtDate).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" });
+        const currency  = evt.country || evt.currency || "";
+        const forecast  = evt.forecast  != null ? `\nForecast: <b>${evt.forecast}</b>`  : "";
+        const previous  = evt.previous  != null ? `\nPrevious: ${evt.previous}` : "";
+
+        const msg = [
+          "🔴 <b>HIGH IMPACT EVENT IN 30 MIN</b>",
+          "",
+          `📌 <b>${evt.title || evt.event || evt.name}</b>`,
+          `🕐 ${evtTime} UTC${currency ? `  |  ${currency}` : ""}`,
+          forecast,
+          previous,
+          "",
+          "Consider reviewing open positions before this release.",
+        ].filter(l => l !== null && l !== undefined).join("\n");
+
+        sendTelegramMsg(chatId, msg);
+        console.log("[TELEGRAM] Sent 30-min alert for:", evt.title, "at", evtDate);
+      });
+
+      // Clean up old sent alerts (keep only last 200)
+      if (sentAlerts.size > 200) {
+        const arr = [...sentAlerts];
+        arr.slice(0, arr.length - 200).forEach(k => sentAlerts.delete(k));
+      }
+    } catch(e) {
+      console.warn("[TELEGRAM] Scheduler error:", e.message);
+    }
+  };
+
+  // Run immediately on boot, then every 60 seconds
+  setTimeout(checkHighImpactEvents, 5000);
+  setInterval(checkHighImpactEvents, 60 * 1000);
+  console.log("[TELEGRAM] High-impact news scheduler started (checks every 60s)");
 });
+
