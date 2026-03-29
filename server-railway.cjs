@@ -1978,7 +1978,12 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
       const { sym, price, dir, chatId } = body;
       if (!sym || !price || !dir) return json(res, 400, { error: "sym, price, dir required" });
       if (!global._priceAlerts) global._priceAlerts = [];
-      const alert = { id: Date.now().toString(), sym: sym.toUpperCase(), price: parseFloat(price), dir, chatId: chatId||global._telegramChatId||process.env.TELEGRAM_CHAT_ID||"", triggered: false, createdAt: new Date().toISOString() };
+      // Normalize symbol — accept BTC, BTCUSD, BTC/USD all → BTCUSD
+      const rawSym = sym.toUpperCase().replace("/","");
+      const symNorm = rawSym.length<=5 && !rawSym.endsWith("USD") && !rawSym.endsWith("JPY") && !rawSym.endsWith("GBP")
+        ? rawSym + "USD" : rawSym;
+      const chatIdFinal = chatId || global._telegramChatId || process.env.TELEGRAM_CHAT_ID || "";
+      const alert = { id: Date.now().toString(), sym: symNorm, price: parseFloat(price), dir, chatId: chatIdFinal, triggered: false, createdAt: new Date().toISOString() };
       global._priceAlerts.push(alert);
       console.log("[PRICE-ALERT] Added:", alert.sym, alert.dir, alert.price);
       return json(res, 200, { ok: true, alert });
@@ -2113,7 +2118,9 @@ server.listen(PORT, "0.0.0.0", () => {
   const checkPriceAlerts = async () => {
     if (!global._priceAlerts || !global._priceAlerts.length) return;
     const bot = process.env.TELEGRAM_BOT_TOKEN || "";
-    if (!bot) return;
+    if (!bot) { console.warn("[PRICE-ALERT] TELEGRAM_BOT_TOKEN not set"); return; }
+    const chatIdEnv = process.env.TELEGRAM_CHAT_ID || global._telegramChatId || "";
+    if (!chatIdEnv) { console.warn("[PRICE-ALERT] No TELEGRAM_CHAT_ID set — alerts will not send"); }
 
     const https = require("https");
     const activeAlerts = global._priceAlerts.filter(a => !a.triggered);
@@ -2153,11 +2160,19 @@ server.listen(PORT, "0.0.0.0", () => {
 
       // Check each alert
       activeAlerts.forEach(alert => {
-        const tdSym = TD_MAP[alert.sym] || alert.sym;
-        // Twelve Data returns nested object for multiple symbols
-        const priceData = symbols.length === 1 ? prices : prices[tdSym];
+        const tdSym = TD_MAP[alert.sym] || TD_MAP[alert.sym.replace("USD","")] || alert.sym;
+        // Twelve Data: single symbol returns {price:"..."}, multiple returns {SYM:{price:"..."}}
+        let priceData;
+        if (symbols.length === 1) {
+          priceData = prices;
+        } else {
+          priceData = prices[tdSym] || prices[alert.sym] || prices[TD_MAP[alert.sym]] || null;
+        }
         const curPrice = parseFloat(priceData?.price);
-        if (!curPrice || isNaN(curPrice)) return;
+        if (!curPrice || isNaN(curPrice)) {
+          console.warn("[PRICE-ALERT] No price for:", alert.sym, "tdSym:", tdSym, "keys:", Object.keys(prices||{}).join(","));
+          return;
+        }
 
         const hit = (alert.dir === "above" && curPrice >= alert.price) ||
                     (alert.dir === "below" && curPrice <= alert.price);
@@ -2171,15 +2186,19 @@ server.listen(PORT, "0.0.0.0", () => {
         console.log("[PRICE-ALERT] Triggered:", alert.sym, alert.dir, alert.price, "current:", curPrice);
 
         // Send Telegram
-        const chatId = alert.chatId || global._telegramChatId || process.env.TELEGRAM_CHAT_ID || "";
-        if (!chatId) return;
+        // Always try latest chatId — env var survives restarts, global may not
+        const chatId = process.env.TELEGRAM_CHAT_ID || global._telegramChatId || alert.chatId || "";
+        if (!chatId) {
+          console.warn("[PRICE-ALERT] No chatId for alert:", alert.sym, "— set TELEGRAM_CHAT_ID in Railway Variables");
+          return;
+        }
 
         const dirEmoji = alert.dir === "above" ? "↑" : "↓";
         const msg = [
           "<b>TradeLedger Price Alert</b>",
           "",
           dirEmoji + " <b>" + alert.sym + "</b> is " + alert.dir + " $" + alert.price,
-          "Current price: <b>$" + curPrice.toFixed(alert.sym.includes("USD") && !alert.sym.includes("JPY") ? 5 : 2) + "</b>",
+          "Current price: <b>$" + (["BTCUSD","ETHUSD","NAS100","SPX500","US30","XAUUSD"].includes(alert.sym) ? curPrice.toFixed(2) : alert.sym.includes("JPY") ? curPrice.toFixed(3) : curPrice.toFixed(5)) + "</b>",
           "",
           "Alert set at: $" + alert.price,
           "Triggered: " + new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", timeZone: "UTC" }) + " UTC",
