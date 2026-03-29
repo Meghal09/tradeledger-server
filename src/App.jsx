@@ -3409,7 +3409,36 @@ function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,account
               }}>{telegramTesting?"Testing...":"Test & Save"}</button>
             </div>
           </div>
-          {telegramStatus==="success"&&<div style={{fontSize:12,color:T.green,fontWeight:600}}>Connected! Check your Telegram. You will now receive alerts 30 min before HIGH impact news events automatically.</div>}
+          {telegramStatus==="success"&&(
+            <div>
+              <div style={{fontSize:12,color:T.green,fontWeight:600,marginBottom:10}}>Connected! Check your Telegram for a test message.</div>
+              <div style={{background:T.blueBg,border:"1px solid rgba(79,128,255,.25)",borderRadius:10,padding:"12px 14px"}}>
+                <div style={{fontSize:12,fontWeight:700,color:T.blue,marginBottom:6}}>Step 5 — Activate Bot Commands</div>
+                <div style={{fontSize:11,color:T.textSub,marginBottom:10,lineHeight:1.7}}>
+                  Click below to register the webhook so you can message your bot directly to set price alerts from Telegram — no need to open the app.
+                </div>
+                <button className="btn btn-primary" style={{fontSize:11}} onClick={async()=>{
+                  const host="tradeledger-server-production.up.railway.app";
+                  const r=await fetch(SERVER+"/api/telegram/webhook/set?host="+host);
+                  const d=await r.json();
+                  if(d.ok)setTelegramStatus("webhook_ok");
+                  else alert("Webhook error: "+(d.description||d.error||JSON.stringify(d)));
+                }}>Register Bot Commands</button>
+              </div>
+            </div>
+          )}
+          {telegramStatus==="webhook_ok"&&(
+            <div style={{background:T.greenBg,border:"1px solid "+T.greenBorder,borderRadius:10,padding:"12px 14px"}}>
+              <div style={{fontSize:12,fontWeight:700,color:T.green,marginBottom:6}}>Bot fully activated!</div>
+              <div style={{fontSize:11,color:T.textSub,lineHeight:1.8}}>
+                Open Telegram → message your bot:<br/>
+                <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>/alert BTCUSD above 67000</code> — set a price alert<br/>
+                <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>/alerts</code> — list active alerts<br/>
+                <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>/price XAUUSD</code> — get current price<br/>
+                <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>/clear</code> — remove all alerts
+              </div>
+            </div>
+          )}
           {telegramStatus&&telegramStatus!=="success"&&<div style={{fontSize:12,color:T.red}}>{telegramStatus}</div>}
           {localStorage.getItem&&localStorage.getItem("tl_telegram_chat")&&telegramStatus!=="success"&&(
             <div style={{fontSize:11,color:T.green}}>Chat ID saved: {localStorage.getItem("tl_telegram_chat")}</div>
