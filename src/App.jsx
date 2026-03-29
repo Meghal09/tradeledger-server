@@ -107,6 +107,19 @@ const GlobalStyles=({dark})=>(
     .page{animation:fadeUp .2s ease both;}
     .tab-content{animation:fadeUp .18s ease both;}
     .trow{transition:background .12s;}
+    @media(max-width:768px){
+      .sidebar-desktop{display:none!important;}
+      .bottom-nav{display:flex!important;}
+      .mobile-grid-1{grid-template-columns:1fr!important;}
+      .mobile-grid-2{grid-template-columns:1fr 1fr!important;}
+      .mobile-hide{display:none!important;}
+      .mobile-full{width:100%!important;max-width:100%!important;}
+    }
+    @media(min-width:769px){
+      .bottom-nav{display:none!important;}
+    }
+    .bottom-nav{position:fixed;bottom:0;left:0;right:0;height:56px;background:${T.surface};border-top:1px solid ${T.border};display:flex;align-items:center;justify-content:space-around;z-index:100;display:none;}
+    .bottom-nav-item{display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;border:none;background:none;cursor:pointer;font-family:inherit;flex:1;}
     .card{background:#fff;border-radius:14px;border:1px solid ${T.border};box-shadow:0 1px 3px rgba(0,0,0,0.04);}
     .card:hover{border-color:${T.borderHover};}
     .btn{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:8px;border:1px solid ${T.border};background:#fff;color:${T.text};font-size:12px;font-weight:500;cursor:pointer;transition:all .15s;white-space:nowrap;}
@@ -641,9 +654,68 @@ function PriceAlerts({watchlist, prices}){
   );
 }
 
+
+// ── TRADINGVIEW MODAL ─────────────────────────────────────────────────────
+function TVModal({symbol, onClose}){
+  const tvSym = symbol
+    .replace("XAUUSD","OANDA:XAUUSD")
+    .replace("XAGUSD","OANDA:XAGUSD")
+    .replace("BTCUSD","BITSTAMP:BTCUSD")
+    .replace("ETHUSD","BITSTAMP:ETHUSD")
+    .replace("SOLUSD","BINANCE:SOLUSDT")
+    .replace("BNBUSD","BINANCE:BNBUSDT")
+    .replace("NAS100","NASDAQ:NDX")
+    .replace("SPX500","SP:SPX")
+    .replace("US30","DJ:DJI")
+    .replace("USOIL","TVC:USOIL");
+  const finalSym = tvSym.includes(":") ? tvSym : "FX:"+symbol.slice(0,3)+symbol.slice(3,6);
+  const theme = document.documentElement.style.getPropertyValue("--dark")==="1"?"dark":"light";
+  useEffect(()=>{
+    const script = document.createElement("script");
+    script.src = "https://s3.tradingview.com/tv.js";
+    script.onload = ()=>{
+      if(window.TradingView){
+        new window.TradingView.widget({
+          container_id:"tv_chart_container",
+          symbol: finalSym,
+          interval:"60",
+          timezone:"Etc/UTC",
+          theme: T.bg==="#0e1117"?"dark":"light",
+          style:"1",
+          locale:"en",
+          toolbar_bg:T.surface,
+          enable_publishing:false,
+          hide_top_toolbar:false,
+          hide_legend:false,
+          save_image:false,
+          height:"100%",
+          width:"100%",
+        });
+      }
+    };
+    document.head.appendChild(script);
+    return()=>{ try{document.head.removeChild(script);}catch{} };
+  },[]);
+  return (
+    <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.7)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
+      <div style={{background:T.surface,borderRadius:16,border:"1px solid "+T.border,width:"min(1000px,95vw)",height:"min(640px,90vh)",display:"flex",flexDirection:"column",overflow:"hidden",boxShadow:"0 32px 80px rgba(0,0,0,.4)"}}>
+        <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
+          <div>
+            <span style={{fontSize:14,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{symbol}</span>
+            <span style={{fontSize:11,color:T.textDim,marginLeft:8}}>TradingView · Live Chart</span>
+          </div>
+          <button onClick={onClose} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:T.textDim,lineHeight:1,padding:"0 4px"}}>×</button>
+        </div>
+        <div id="tv_chart_container" style={{flex:1,minHeight:0}}/>
+      </div>
+    </div>
+  );
+}
+
 // ── WATCHLIST ─────────────────────────────────────────────────
 function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analyseSymbol,trades}){
   const [pickerOpen,setPickerOpen]=useState(false);
+  const [tvSym,setTvSym]=useState(null);
   const [pickerCat,setPickerCat]=useState("Forex");
   const [selectedSym,setSelectedSym]=useState(null);
   const [sizerOpen,setSizerOpen]=useState(false);
@@ -804,7 +876,10 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
                   <div style={{textAlign:"right"}}>
                     {q?<Badge color={isUp?"green":isDown?"red":"gray"}>{isUp?"+":""}{q.changePct}%</Badge>:<span className="skeleton" style={{width:36,height:17,display:"inline-block",borderRadius:4}}/>}
                   </div>
-                  <div style={{textAlign:"right"}}><button onClick={e=>{e.stopPropagation();onRemoveSymbol(sym);}} style={{background:"none",border:"none",color:T.textDim,cursor:"pointer",fontSize:15,padding:2,lineHeight:1}}>x</button></div>
+                  <div style={{textAlign:"right",display:"flex",gap:4,justifyContent:"flex-end"}}>
+                    <button onClick={e=>{e.stopPropagation();setTvSym(sym);}} style={{background:"none",border:"none",color:T.blue,cursor:"pointer",fontSize:11,padding:2,lineHeight:1,fontWeight:600}}>TV</button>
+                    <button onClick={e=>{e.stopPropagation();onRemoveSymbol(sym);}} style={{background:"none",border:"none",color:T.textDim,cursor:"pointer",fontSize:15,padding:2,lineHeight:1}}>x</button>
+                  </div>
                 </div>
               );
             })}
@@ -983,6 +1058,90 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
   );
 }
 
+
+// ── PDF EXPORT ────────────────────────────────────────────────────────────
+function exportPDF(trades, stats){
+  const d=new Date().toLocaleDateString("en-US",{month:"long",day:"numeric",year:"numeric"});
+  const pnlColor=stats.totalProfit>=0?"#00c48c":"#ff5b5b";
+  const html=`<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <title>TradeLedger Report — ${d}</title>
+  <style>
+    *{margin:0;padding:0;box-sizing:border-box;}
+    body{font-family:'Helvetica Neue',Arial,sans-serif;font-size:12px;color:#1a1d2e;background:#fff;padding:32px;}
+    h1{font-size:24px;font-weight:800;letter-spacing:-0.5px;margin-bottom:4px;}
+    .sub{font-size:12px;color:#6b7280;margin-bottom:24px;}
+    .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px;}
+    .kpi{border:1px solid #e5e7eb;border-radius:10px;padding:12px 16px;}
+    .kpi-label{font-size:9px;color:#9ca3af;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:4px;}
+    .kpi-value{font-size:20px;font-weight:700;font-family:'Courier New',monospace;}
+    .section{margin-bottom:24px;}
+    .section-title{font-size:13px;font-weight:700;margin-bottom:10px;padding-bottom:6px;border-bottom:2px solid #f0f2f8;}
+    table{width:100%;border-collapse:collapse;font-size:11px;}
+    th{background:#f0f2f8;padding:8px 10px;text-align:left;font-size:9px;text-transform:uppercase;letter-spacing:0.05em;color:#6b7280;}
+    td{padding:7px 10px;border-bottom:1px solid #f0f2f8;}
+    .badge-w{background:#d1fae5;color:#065f46;border-radius:4px;padding:1px 6px;font-size:9px;font-weight:700;}
+    .badge-l{background:#fee2e2;color:#991b1b;border-radius:4px;padding:1px 6px;font-size:9px;font-weight:700;}
+    .stats-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;}
+    .stat{background:#f9fafb;border-radius:8px;padding:10px 12px;}
+    .stat-l{font-size:9px;color:#9ca3af;text-transform:uppercase;margin-bottom:4px;}
+    .stat-v{font-size:14px;font-weight:700;font-family:'Courier New',monospace;}
+    .footer{margin-top:32px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:10px;color:#9ca3af;display:flex;justify-content:space-between;}
+    @media print{body{padding:16px;} .no-print{display:none;}}
+  </style></head><body>
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:20px;">
+    <div>
+      <h1>TradeLedger</h1>
+      <div class="sub">Performance Report — Generated ${d}</div>
+    </div>
+    <div style="text-align:right;font-size:11px;color:#6b7280;">
+      <div style="font-size:22px;font-weight:800;color:${pnlColor};font-family:'Courier New',monospace;">${stats.totalProfit>=0?"+":""}$${stats.totalProfit}</div>
+      <div>Net P&L · ${stats.total} trades</div>
+    </div>
+  </div>
+
+  <div class="kpis">
+    <div class="kpi"><div class="kpi-label">Win Rate</div><div class="kpi-value" style="color:${stats.winRate>=50?"#00c48c":"#ff5b5b"}">${stats.winRate}%</div></div>
+    <div class="kpi"><div class="kpi-label">Profit Factor</div><div class="kpi-value" style="color:${stats.pf>=1.5?"#00c48c":stats.pf>=1?"#f59e0b":"#ff5b5b"}">${stats.pf}</div></div>
+    <div class="kpi"><div class="kpi-label">Max Drawdown</div><div class="kpi-value" style="color:${stats.maxDD>15?"#ff5b5b":"#f59e0b"}">${stats.maxDD}%</div></div>
+    <div class="kpi"><div class="kpi-label">Expectancy</div><div class="kpi-value" style="color:${stats.expectancy>=0?"#00c48c":"#ff5b5b"}">$${stats.expectancy}</div></div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Key Statistics</div>
+    <div class="stats-grid">
+      ${[["Gross Profit","$"+stats.grossProfit,"#00c48c"],["Gross Loss","$"+stats.grossLoss,"#ff5b5b"],["Avg Win","$"+stats.avgWin,"#00c48c"],["Avg Loss","$"+stats.avgLoss,"#ff5b5b"],["Max Win Streak",stats.maxCW,"#00c48c"],["Max Loss Streak",stats.maxCL,"#ff5b5b"],["R:R Ratio",stats.rr,""],["Best Month",stats.bestMonth?"$"+stats.bestMonth.profit.toFixed(0):"--","#00c48c"],["Active Days",stats.activeDays,""]].map(([l,v,c])=>`<div class="stat"><div class="stat-l">${l}</div><div class="stat-v" style="color:${c||"#1a1d2e"}">${v}</div></div>`).join("")}
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Symbol Breakdown</div>
+    <table><thead><tr><th>Symbol</th><th>Trades</th><th>Win Rate</th><th>Net P&L</th><th>Avg P&L</th></tr></thead>
+    <tbody>${stats.bySymbol.slice(0,10).map(s=>{
+      const wr=s.trades?Math.round(s.wins/s.trades*100):0;
+      const avg=s.trades?(s.profit/s.trades).toFixed(2):0;
+      return `<tr><td style="font-weight:700;font-family:'Courier New',monospace">${s.symbol}</td><td>${s.trades}</td><td style="color:${wr>=50?"#00c48c":"#ff5b5b"};font-weight:700">${wr}%</td><td style="color:${s.profit>=0?"#00c48c":"#ff5b5b"};font-weight:700;font-family:'Courier New',monospace">${s.profit>=0?"+":""}$${s.profit}</td><td style="font-family:'Courier New',monospace">${parseFloat(avg)>=0?"+":""}$${avg}</td></tr>`;
+    }).join("")}</tbody></table>
+  </div>
+
+  <div class="section">
+    <div class="section-title">Recent Trades (last 20)</div>
+    <table><thead><tr><th>Symbol</th><th>Type</th><th>Open</th><th>Close</th><th>Profit</th><th>Result</th></tr></thead>
+    <tbody>${[...trades].reverse().slice(0,20).map(t=>{
+      const net=(t.profit||0)+(t.swap||0)+(t.commission||0);
+      return `<tr><td style="font-weight:700;font-family:'Courier New',monospace">${t.symbol}</td><td>${(t.type||"").toUpperCase()}</td><td style="font-family:'Courier New',monospace;font-size:10px">${(t.openTime||"").slice(0,16)}</td><td style="font-family:'Courier New',monospace;font-size:10px">${(t.closeTime||"").slice(0,16)}</td><td style="font-weight:700;font-family:'Courier New',monospace;color:${net>=0?"#00c48c":"#ff5b5b"}">${net>=0?"+":""}$${net.toFixed(2)}</td><td><span class="${net>=0?"badge-w":"badge-l"}">${net>=0?"WIN":"LOSS"}</span></td></tr>`;
+    }).join("")}</tbody></table>
+  </div>
+
+  <div class="footer">
+    <span>TradeLedger Performance Report · ${d}</span>
+    <span>tradeledger.app · Generated automatically</span>
+  </div>
+  <script>window.onload=()=>window.print();</script>
+  </body></html>`;
+  const win=window.open("","_blank");
+  if(win){win.document.write(html);win.document.close();}
+}
+
 // ── ANALYTICS ────────────────────────────────────────────────
 function exportCSV(trades){
   const rows=[["#","Symbol","Type","Open Time","Close Time","Lots","Open Price","Close Price","Profit","Swap","Commission","Net P&L"]];
@@ -1015,6 +1174,7 @@ function AnalyticsTab({trades,stats,weeklyAI,genWeeklyAI}){
         <div><h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Analytics</h1><p style={{fontSize:12,color:T.textSub,marginTop:1}}>{stats.total} trades analysed</p></div>
         <div style={{display:"flex",gap:8}}>
           <button className="btn" style={{fontSize:11}} onClick={()=>exportCSV(trades)}>Export CSV</button>
+          {stats&&<button className="btn btn-primary" style={{fontSize:11}} onClick={()=>exportPDF(trades,stats)}>Export PDF</button>}
         </div>
       </div>
 
@@ -2031,6 +2191,7 @@ function JournalTab({trades}){
           </div>
         </div>
         <div style={{display:"flex",gap:8}}>
+          {selected.symbol&&<button className="btn" style={{fontSize:11}} onClick={()=>{window.__tvSym=selected.symbol;const el=document.createElement("div");el.id="tv_quick";document.body.appendChild(el);const modal=document.createElement("div");modal.style.cssText="position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.7);display:flex;align-items:center;justify-content:center;padding:20px";modal.innerHTML='<div style="background:#fff;border-radius:16px;width:min(1000px,95vw);height:min(640px,90vh);display:flex;flex-direction:column;overflow:hidden"><div style="padding:12px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center"><span style="font-weight:700">'+selected.symbol+' — TradingView</span><button onclick="this.closest('[data-modal]').remove()" style="background:none;border:none;font-size:22px;cursor:pointer">×</button></div><div id="tv_embed" style="flex:1"></div></div>';modal.setAttribute("data-modal","1");modal.onclick=e=>{if(e.target===modal)modal.remove();};document.body.appendChild(modal);const s=document.createElement("script");s.src="https://s3.tradingview.com/tv.js";s.onload=()=>{if(window.TradingView)new window.TradingView.widget({container_id:"tv_embed",symbol:selected.symbol.length===6?"FX:"+selected.symbol.slice(0,3)+selected.symbol.slice(3,6):selected.symbol,interval:"60",theme:"light",style:"1",locale:"en",height:"100%",width:"100%",save_image:false});};document.head.appendChild(s);}}>Chart</button>}
           {selected.needsReview&&!selected.reviewed&&(
             <button className="btn btn-primary" style={{fontSize:11,background:T.green,borderColor:T.green}} onClick={()=>{
               const updated=entries.map(e=>e.id===selected.id?{...e,reviewed:true,needsReview:false}:e);
@@ -3103,6 +3264,9 @@ function CryptoTab({prices, pFlash, onAddSymbol}){
 // ── SETUP ─────────────────────────────────────────────────────
 function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,accounts,setAccounts,activeAccount,setActiveAccount,prices}){
   const [rlInput,setRlInput]=useState(riskLimit||"");
+  const [telegramChatId,setTelegramChatId]=useState(()=>{try{return localStorage.getItem("tl_telegram_chat")||"";}catch{return "";}});
+  const [telegramTesting,setTelegramTesting]=useState(false);
+  const [telegramStatus,setTelegramStatus]=useState(null);
   return (
     <div className="page" style={{overflowY:"auto",height:"100%"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:20}}>
@@ -3198,6 +3362,36 @@ function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,account
             ))}
           </div>
           <button className="btn" onClick={()=>{const label=prompt("Account name (e.g. Demo, Prop Firm, Live):","");if(!label)return;const token=prompt("Auth token for this account:","TL-");if(!token)return;const na=[...accounts,{id:Date.now().toString(),label,token,trades:[]}];setAccounts(na);try{localStorage.setItem("tl_accounts",JSON.stringify(na));}catch{}}}>+ Add Account</button>
+        </div>
+
+        {/* TELEGRAM ALERTS */}
+        <div className="card" style={{padding:20,gridColumn:"1/-1"}}>
+          <div style={{fontSize:13,fontWeight:600,marginBottom:4}}>Telegram Alerts</div>
+          <div style={{fontSize:12,color:T.textSub,marginBottom:14,lineHeight:1.7}}>
+            Get notified on Telegram when price alerts trigger, trades close, or high-impact news drops.<br/>
+            <strong>Setup:</strong> Search <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>@BotFather</code> on Telegram → /newbot → copy token → add as <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>TELEGRAM_BOT_TOKEN</code> in Railway Variables. Then message your bot and enter your Chat ID below.
+          </div>
+          <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:10,maxWidth:500,marginBottom:10}}>
+            <div>
+              <div style={{fontSize:11,color:T.textDim,marginBottom:4,fontWeight:500}}>Your Telegram Chat ID</div>
+              <input className="input" type="text" placeholder="e.g. 123456789 (message @userinfobot to find yours)" value={telegramChatId} onChange={e=>setTelegramChatId(e.target.value)} style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
+            </div>
+            <div style={{display:"flex",gap:6,alignItems:"flex-end"}}>
+              <button className="btn btn-primary" style={{fontSize:11}} disabled={!telegramChatId||telegramTesting} onClick={async()=>{
+                setTelegramTesting(true);setTelegramStatus(null);
+                try{const r=await fetch(SERVER+"/api/telegram/test?chatId="+telegramChatId);const d=await r.json();
+                  if(d.ok){try{localStorage.setItem("tl_telegram_chat",telegramChatId);}catch{}setTelegramStatus("success");}
+                  else setTelegramStatus(d.error||"Failed");
+                }catch(e){setTelegramStatus(e.message);}
+                setTelegramTesting(false);
+              }}>{telegramTesting?"Testing...":"Test & Save"}</button>
+            </div>
+          </div>
+          {telegramStatus==="success"&&<div style={{fontSize:12,color:T.green,fontWeight:600}}>Connected! Check your Telegram for a test message.</div>}
+          {telegramStatus&&telegramStatus!=="success"&&<div style={{fontSize:12,color:T.red}}>{telegramStatus}</div>}
+          {localStorage.getItem&&localStorage.getItem("tl_telegram_chat")&&telegramStatus!=="success"&&(
+            <div style={{fontSize:11,color:T.green}}>Chat ID saved: {localStorage.getItem("tl_telegram_chat")}</div>
+          )}
         </div>
 
         <div className="card" style={{padding:20,gridColumn:"1/-1"}}>
@@ -3328,6 +3522,18 @@ export default function TradeLedger(){
     const merged=[...newDrafts,...drafts];
     try{localStorage.setItem(JKEY,JSON.stringify(merged));}catch{}
     console.log("[JOURNAL] Auto-added "+newDrafts.length+" trade draft(s)");
+    // Telegram notification for closed trades
+    try{
+      const chatId=localStorage.getItem("tl_telegram_chat");
+      if(chatId&&newDrafts.length){
+        newDrafts.forEach(d=>{
+          const emoji=d.pnl>=0?"green":"red";
+          const text="<b>TradeLedger — Trade Closed</b>\n"+d.symbol+" "+d.type.toUpperCase()+"\nP&L: "+(d.pnl>=0?"+":"")+d.pnl+"\nOutcome: "+d.outcome.toUpperCase();
+          fetch(SERVER+"/api/telegram/send",{method:"POST",headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({chatId,text})}).catch(()=>{});
+        });
+      }
+    }catch{}
   },[]);
 
   const connectWS=useCallback(()=>{
@@ -3486,7 +3692,7 @@ export default function TradeLedger(){
       {/* App shell */}
       <div style={{display:"flex",height:"100vh",overflow:"hidden",background:T.bg}}>
         {/* Sidebar */}
-        <div style={{width:200,background:"#fff",borderRight:`1px solid ${T.border}`,display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden",boxShadow:"1px 0 6px rgba(0,0,0,0.04)"}}>
+        <div className="sidebar-desktop" style={{width:200,background:T.surface,borderRight:"1px solid "+T.border,display:"flex",flexDirection:"column",flexShrink:0,overflow:"hidden",boxShadow:"1px 0 6px rgba(0,0,0,0.04)"}}>
           <div style={{padding:"14px 12px",borderBottom:`1px solid ${T.border}`,display:"flex",alignItems:"center",gap:10,flexShrink:0}}>
             <div style={{width:32,height:32,borderRadius:10,background:`linear-gradient(135deg,${T.blue},#6d9bff)`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:12,fontWeight:800,color:"#fff",flexShrink:0}}>TL</div>
             <div style={{flex:1,minWidth:0}}>
@@ -3601,7 +3807,7 @@ export default function TradeLedger(){
           {!serverOk&&<div style={{background:T.redBg,borderBottom:`1px solid ${T.redBorder}`,padding:"6px 18px",display:"flex",alignItems:"center",gap:8,fontSize:12,color:T.red,flexShrink:0}}><div style={{width:5,height:5,borderRadius:"50%",background:T.red,animation:"pulse 1.5s infinite",flexShrink:0}}/>Server offline — AI features unavailable<button className="btn" style={{marginLeft:"auto",fontSize:11,color:T.red,borderColor:T.redBorder,padding:"3px 10px"}} onClick={fetchAll}>Retry</button></div>}
 
           {/* Page — key fixes: overflowY:auto on content div, min-height:0 on flex chain */}
-          <div style={{flex:1,overflowY:"auto",padding:"14px 16px 20px",minHeight:0}}>
+          <div style={{flex:1,overflowY:"auto",padding:"14px 16px 20px",paddingBottom:"calc(20px + env(safe-area-inset-bottom,0px))",minHeight:0}}>
             {tab==="dashboard"&&<DashboardTab trades={trades} stats={stats} serverOk={serverOk} lastSync={lastSync}/>}
             {tab==="watchlist"&&<WatchlistTab watchlist={watchlist} prices={prices} pFlash={pFlash} onAddSymbol={onAddSymbol} onRemoveSymbol={onRemoveSymbol} analyseSymbol={analyseSymbol} trades={trades}/>}
             {tab==="analytics"&&<AnalyticsTab trades={trades} stats={stats} weeklyAI={weeklyAI} genWeeklyAI={genWeeklyAI}/>}
@@ -3613,6 +3819,17 @@ export default function TradeLedger(){
           </div>
         </div>
       </div>
+      {/* Mobile bottom navigation */}
+      <nav className="bottom-nav" style={{paddingBottom:"env(safe-area-inset-bottom,0px)"}}>
+        {NAV.slice(0,6).map(n=>{
+          const active=tab===n.id;
+          return <button key={n.id} className="bottom-nav-item" onClick={()=>setTab(n.id)}
+            style={{color:active?T.blue:T.textDim}}>
+            <span style={{fontSize:16}}>{n.icon}</span>
+            <span style={{fontSize:9,fontWeight:active?700:400}}>{n.label}</span>
+          </button>;
+        })}
+      </nav>
     </>
   );
 }
