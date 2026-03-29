@@ -118,7 +118,7 @@ const GlobalStyles=({dark})=>(
     @media(min-width:769px){
       .bottom-nav{display:none!important;}
     }
-    .bottom-nav{position:fixed;bottom:0;left:0;right:0;height:56px;background:${T.surface};border-top:1px solid ${T.border};display:flex;align-items:center;justify-content:space-around;z-index:100;display:none;}
+    .bottom-nav{position:fixed;bottom:0;left:0;right:0;height:56px;background:${T.surface};border-top:1px solid ${T.border};align-items:center;justify-content:space-around;z-index:100;display:none;}
     .bottom-nav-item{display:flex;flex-direction:column;align-items:center;gap:2px;padding:4px 8px;border:none;background:none;cursor:pointer;font-family:inherit;flex:1;}
     .card{background:#fff;border-radius:14px;border:1px solid ${T.border};box-shadow:0 1px 3px rgba(0,0,0,0.04);}
     .card:hover{border-color:${T.borderHover};}
@@ -657,56 +657,44 @@ function PriceAlerts({watchlist, prices}){
 
 // ── TRADINGVIEW MODAL ─────────────────────────────────────────────────────
 function TVModal({symbol, onClose}){
-  const tvSym = symbol
-    .replace("XAUUSD","OANDA:XAUUSD")
-    .replace("XAGUSD","OANDA:XAGUSD")
-    .replace("BTCUSD","BITSTAMP:BTCUSD")
-    .replace("ETHUSD","BITSTAMP:ETHUSD")
-    .replace("SOLUSD","BINANCE:SOLUSDT")
-    .replace("BNBUSD","BINANCE:BNBUSDT")
-    .replace("NAS100","NASDAQ:NDX")
-    .replace("SPX500","SP:SPX")
-    .replace("US30","DJ:DJI")
-    .replace("USOIL","TVC:USOIL");
-  const finalSym = tvSym.includes(":") ? tvSym : "FX:"+symbol.slice(0,3)+symbol.slice(3,6);
-  const theme = document.documentElement.style.getPropertyValue("--dark")==="1"?"dark":"light";
+  // Map MT5 symbols to TradingView format
+  const tvMap = {
+    "EURUSD":"FX:EURUSD","GBPUSD":"FX:GBPUSD","USDJPY":"FX:USDJPY","USDCHF":"FX:USDCHF",
+    "AUDUSD":"FX:AUDUSD","NZDUSD":"FX:NZDUSD","USDCAD":"FX:USDCAD","GBPJPY":"FX:GBPJPY",
+    "EURJPY":"FX:EURJPY","EURGBP":"FX:EURGBP","XAUUSD":"OANDA:XAUUSD","XAGUSD":"OANDA:XAGUSD",
+    "BTCUSD":"BITSTAMP:BTCUSD","ETHUSD":"BITSTAMP:ETHUSD","SOLUSD":"BINANCE:SOLUSDT",
+    "BNBUSD":"BINANCE:BNBUSDT","NAS100":"NASDAQ:NDX","SPX500":"SP:SPX",
+    "US30":"DJ:DJI","USOIL":"TVC:USOIL","UKOIL":"TVC:UKOIL",
+  };
+  const tvSym = tvMap[symbol] || (symbol.length===6?"FX:"+symbol.slice(0,3)+symbol.slice(3,6):symbol);
+  const isDark = T.bg==="#0e1117";
+  const theme = isDark?"dark":"light";
+  // Use TradingView embed URL — works without loading external scripts
+  const src = "https://www.tradingview.com/widgetembed/?frameElementId=tv_widget&symbol="+encodeURIComponent(tvSym)+"&interval=60&hidesidetoolbar=0&hidetoptoolbar=0&symboledit=1&saveimage=0&toolbarbg="+(isDark?"1C2030":"f1f3f6")+"&studies=[]&theme="+theme+"&style=1&timezone=Etc%2FUTC&locale=en";
+
+  // Close on Escape key
   useEffect(()=>{
-    const script = document.createElement("script");
-    script.src = "https://s3.tradingview.com/tv.js";
-    script.onload = ()=>{
-      if(window.TradingView){
-        new window.TradingView.widget({
-          container_id:"tv_chart_container",
-          symbol: finalSym,
-          interval:"60",
-          timezone:"Etc/UTC",
-          theme: T.bg==="#0e1117"?"dark":"light",
-          style:"1",
-          locale:"en",
-          toolbar_bg:T.surface,
-          enable_publishing:false,
-          hide_top_toolbar:false,
-          hide_legend:false,
-          save_image:false,
-          height:"100%",
-          width:"100%",
-        });
-      }
-    };
-    document.head.appendChild(script);
-    return()=>{ try{document.head.removeChild(script);}catch{} };
-  },[]);
+    const h=e=>{if(e.key==="Escape")onClose();};
+    window.addEventListener("keydown",h);
+    return()=>window.removeEventListener("keydown",h);
+  },[onClose]);
+
   return (
-    <div style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.7)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",padding:20}}>
-      <div style={{background:T.surface,borderRadius:16,border:"1px solid "+T.border,width:"min(1000px,95vw)",height:"min(640px,90vh)",display:"flex",flexDirection:"column",overflow:"hidden",boxShadow:"0 32px 80px rgba(0,0,0,.4)"}}>
+    <div onClick={e=>{if(e.target===e.currentTarget)onClose();}}
+      style={{position:"fixed",inset:0,zIndex:2000,background:"rgba(0,0,0,.75)",backdropFilter:"blur(8px)",display:"flex",alignItems:"center",justifyContent:"center",padding:16}}>
+      <div style={{background:T.surface,borderRadius:16,border:"1px solid "+T.border,width:"min(1100px,96vw)",height:"min(680px,92vh)",display:"flex",flexDirection:"column",overflow:"hidden",boxShadow:"0 40px 100px rgba(0,0,0,.5)"}}>
         <div style={{padding:"12px 16px",borderBottom:"1px solid "+T.border,display:"flex",justifyContent:"space-between",alignItems:"center",flexShrink:0}}>
-          <div>
+          <div style={{display:"flex",alignItems:"center",gap:10}}>
             <span style={{fontSize:14,fontWeight:700,fontFamily:"'JetBrains Mono',monospace"}}>{symbol}</span>
-            <span style={{fontSize:11,color:T.textDim,marginLeft:8}}>TradingView · Live Chart</span>
+            <span style={{fontSize:10,color:T.textDim,background:T.bg,border:"1px solid "+T.border,borderRadius:5,padding:"2px 7px"}}>TradingView · 1H</span>
           </div>
-          <button onClick={onClose} style={{background:"none",border:"none",fontSize:22,cursor:"pointer",color:T.textDim,lineHeight:1,padding:"0 4px"}}>×</button>
+          <div style={{display:"flex",gap:8,alignItems:"center"}}>
+            <a href={"https://www.tradingview.com/chart/?symbol="+encodeURIComponent(tvSym)} target="_blank" rel="noopener noreferrer"
+              style={{fontSize:11,color:T.blue,textDecoration:"none",fontWeight:600}}>Open in TradingView</a>
+            <button onClick={onClose} style={{background:"none",border:"none",fontSize:24,cursor:"pointer",color:T.textDim,lineHeight:1,padding:"0 4px",display:"flex",alignItems:"center"}}>×</button>
+          </div>
         </div>
-        <div id="tv_chart_container" style={{flex:1,minHeight:0}}/>
+        <iframe src={src} style={{flex:1,border:"none",minHeight:0}} allowTransparency="true" scrolling="no"/>
       </div>
     </div>
   );
@@ -3369,14 +3357,24 @@ function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,account
         {/* TELEGRAM ALERTS */}
         <div className="card" style={{padding:20,gridColumn:"1/-1"}}>
           <div style={{fontSize:13,fontWeight:600,marginBottom:4}}>Telegram Alerts</div>
-          <div style={{fontSize:12,color:T.textSub,marginBottom:14,lineHeight:1.7}}>
-            Get notified on Telegram when price alerts trigger, trades close, or high-impact news drops.<br/>
-            <strong>Setup:</strong> Search <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>@BotFather</code> on Telegram → /newbot → copy token → add as <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>TELEGRAM_BOT_TOKEN</code> in Railway Variables. Then message your bot and enter your Chat ID below.
+          {/* Step by step instructions */}
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+            {[
+              {n:"1",t:"Create your bot",d:"Open Telegram → search @BotFather → send /newbot → choose a name → copy the token it gives you"},
+              {n:"2",t:"Add token to Railway",d:"Go to Railway → your server → Variables → add TELEGRAM_BOT_TOKEN = your token"},
+              {n:"3",t:"Find your Chat ID",d:"Open Telegram → search @userinfobot → send /start → it replies with your numeric ID (e.g. 123456789)"},
+              {n:"4",t:"Paste ID below & test",d:"Enter your Chat ID in the field below → click Test & Save → you get a Telegram message instantly"},
+            ].map(s=>(
+              <div key={s.n} style={{display:"flex",gap:10,padding:"10px 12px",background:T.bg,borderRadius:9,border:"1px solid "+T.border}}>
+                <div style={{width:22,height:22,borderRadius:6,background:T.blueBg,border:"1px solid rgba(79,128,255,.3)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:11,fontWeight:800,color:T.blue,flexShrink:0}}>{s.n}</div>
+                <div><div style={{fontSize:11,fontWeight:700,marginBottom:2}}>{s.t}</div><div style={{fontSize:11,color:T.textSub,lineHeight:1.6}}>{s.d}</div></div>
+              </div>
+            ))}
           </div>
           <div style={{display:"grid",gridTemplateColumns:"1fr auto",gap:10,maxWidth:500,marginBottom:10}}>
             <div>
-              <div style={{fontSize:11,color:T.textDim,marginBottom:4,fontWeight:500}}>Your Telegram Chat ID</div>
-              <input className="input" type="text" placeholder="e.g. 123456789 (message @userinfobot to find yours)" value={telegramChatId} onChange={e=>setTelegramChatId(e.target.value)} style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
+              <div style={{fontSize:11,color:T.textDim,marginBottom:4,fontWeight:500}}>Your Telegram Chat ID <span style={{color:T.textDim,fontWeight:400}}>(from @userinfobot)</span></div>
+              <input className="input" type="text" placeholder="e.g. 123456789" value={telegramChatId} onChange={e=>setTelegramChatId(e.target.value)} style={{fontSize:12,fontFamily:"'JetBrains Mono',monospace"}}/>
             </div>
             <div style={{display:"flex",gap:6,alignItems:"flex-end"}}>
               <button className="btn btn-primary" style={{fontSize:11}} disabled={!telegramChatId||telegramTesting} onClick={async()=>{
