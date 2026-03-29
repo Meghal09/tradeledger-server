@@ -2004,6 +2004,244 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
     return json(res, 200, { ok: true });
   }
 
+
+  // ── TELEGRAM WEBHOOK — receive messages from user ────────────────────────
+  // POST /api/telegram/webhook — Telegram sends every message here
+  if (req.method === "POST" && url === "/api/telegram/webhook") {
+    try {
+      const body = await new Promise(resolve => {
+        let d = ""; req.on("data", c => d += c);
+        req.on("end", () => { try{resolve(JSON.parse(d));}catch{resolve({});} });
+      });
+
+      const msg   = body?.message;
+      if (!msg) return json(res, 200, { ok: true });
+
+      const chatId  = String(msg.chat?.id || "");
+      const text    = (msg.text || "").trim();
+      const bot     = process.env.TELEGRAM_BOT_TOKEN || "";
+      if (!bot || !chatId) return json(res, 200, { ok: true });
+
+      // Save chatId automatically when user messages the bot
+      if (chatId) {
+        global._telegramChatId = chatId;
+      }
+
+      // Helper: reply to this chat
+      const reply = async (replyText) => {
+        const https = require("https");
+        const payload = JSON.stringify({ chat_id: chatId, text: replyText, parse_mode: "HTML" });
+        return new Promise((resolve) => {
+          const r = https.request({
+            hostname: "api.telegram.org",
+            path: `/bot${bot}/sendMessage`,
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+          }, resp => { resp.resume(); resolve(); });
+          r.on("error", () => resolve());
+          r.write(payload); r.end();
+        });
+      };
+
+      // Helper: fetch current price for a symbol
+      const getPrice = async (sym) => {
+        const https = require("https");
+        const TD_KEY = process.env.TWELVE_DATA_KEY || "";
+        if (!TD_KEY) return null;
+        const TD_MAP = {
+          "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","XAUUSD":"XAU/USD",
+          "BTCUSD":"BTC/USD","ETHUSD":"ETH/USD","SOLUSD":"SOL/USD","BNBUSD":"BNB/USD",
+          "NAS100":"NDX","SPX500":"SPX","US30":"DJI","USOIL":"WTI",
+          "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","GBPJPY":"GBP/JPY",
+        };
+        const tdSym = TD_MAP[sym] || sym;
+        return new Promise((resolve) => {
+          const r = https.request({
+            hostname: "api.twelvedata.com",
+            path: "/price?symbol=" + encodeURIComponent(tdSym) + "&apikey=" + TD_KEY + "&dp=5",
+            method: "GET", timeout: 8000,
+            headers: { "User-Agent": "TradeLedger/1.0" }
+          }, resp => {
+            let d = ""; resp.on("data", c => d += c);
+            resp.on("end", () => {
+              try {
+                const p = JSON.parse(d);
+                resolve(p?.price ? parseFloat(p.price) : null);
+              } catch { resolve(null); }
+            });
+          });
+          r.on("error", () => resolve(null));
+          r.on("timeout", () => { r.destroy(); resolve(null); });
+          r.end();
+        });
+      };
+
+      const cmd = text.toLowerCase();
+
+      // ── /start or /help ────────────────────────────────────────────────
+      if (cmd === "/start" || cmd === "/help") {
+        await reply([
+          "👋 <b>TradeLedger Bot</b>",
+          "",
+          "Commands you can send me:",
+          "",
+          "📌 <b>Set a price alert:</b>",
+          "<code>/alert BTCUSD above 67000</code>",
+          "<code>/alert XAUUSD below 3100</code>",
+          "<code>/alert EURUSD above 1.09500</code>",
+          "",
+          "📋 <b>List your alerts:</b>",
+          "<code>/alerts</code>",
+          "",
+          "💰 <b>Get current price:</b>",
+          "<code>/price BTCUSD</code>",
+          "<code>/price XAUUSD</code>",
+          "",
+          "🗑 <b>Remove an alert:</b>",
+          "<code>/remove 1</code> (use number from /alerts list)",
+          "",
+          "❌ <b>Clear all alerts:</b>",
+          "<code>/clear</code>",
+        ].join("\n"));
+        return json(res, 200, { ok: true });
+      }
+
+      // ── /alerts — list active alerts ───────────────────────────────────
+      if (cmd === "/alerts") {
+        const active = (global._priceAlerts || []).filter(a => !a.triggered);
+        if (!active.length) {
+          await reply("📋 No active price alerts.\n\nSet one with:\n<code>/alert BTCUSD above 67000</code>");
+        } else {
+          const lines = ["📋 <b>Your Active Alerts:</b>", ""];
+          active.forEach((a, i) => {
+            lines.push(`${i+1}. <b>${a.sym}</b> ${a.dir} $${a.price}`);
+          });
+          lines.push("", "Remove with: <code>/remove 1</code>");
+          await reply(lines.join("\n"));
+        }
+        return json(res, 200, { ok: true });
+      }
+
+      // ── /clear — remove all alerts ─────────────────────────────────────
+      if (cmd === "/clear") {
+        const count = (global._priceAlerts || []).filter(a => !a.triggered).length;
+        global._priceAlerts = [];
+        await reply(`🗑 Cleared all ${count} alert${count !== 1 ? "s" : ""}.`);
+        return json(res, 200, { ok: true });
+      }
+
+      // ── /remove N — remove alert by number ────────────────────────────
+      if (cmd.startsWith("/remove ")) {
+        const n = parseInt(cmd.split(" ")[1]);
+        const active = (global._priceAlerts || []).filter(a => !a.triggered);
+        if (isNaN(n) || n < 1 || n > active.length) {
+          await reply("❌ Invalid number. Use <code>/alerts</code> to see your list.");
+        } else {
+          const target = active[n - 1];
+          global._priceAlerts = (global._priceAlerts || []).filter(a => a.id !== target.id);
+          await reply(`✅ Removed alert: <b>${target.sym}</b> ${target.dir} $${target.price}`);
+        }
+        return json(res, 200, { ok: true });
+      }
+
+      // ── /price SYM — get current price ────────────────────────────────
+      if (cmd.startsWith("/price ")) {
+        const rawSym = cmd.split(" ")[1]?.toUpperCase().replace("/","") || "";
+        const sym = rawSym.length <= 5 && !rawSym.endsWith("USD") && !rawSym.endsWith("JPY") ? rawSym + "USD" : rawSym;
+        const price = await getPrice(sym);
+        if (!price) {
+          await reply(`❌ Could not fetch price for <b>${sym}</b>.\n\nTry: BTCUSD, EURUSD, XAUUSD, NAS100`);
+        } else {
+          const dp = ["BTCUSD","ETHUSD","NAS100","SPX500","US30","XAUUSD"].includes(sym) ? 2 : sym.includes("JPY") ? 3 : 5;
+          await reply(`💰 <b>${sym}</b>\nCurrent price: <b>$${price.toFixed(dp)}</b>`);
+        }
+        return json(res, 200, { ok: true });
+      }
+
+      // ── /alert SYM above|below PRICE ──────────────────────────────────
+      if (cmd.startsWith("/alert ")) {
+        const parts = text.trim().split(/\s+/);
+        // /alert BTCUSD above 67000
+        if (parts.length < 4) {
+          await reply("❌ Format: <code>/alert BTCUSD above 67000</code>\nor: <code>/alert EURUSD below 1.08500</code>");
+          return json(res, 200, { ok: true });
+        }
+        const rawSym = parts[1].toUpperCase().replace("/","");
+        const sym    = rawSym.length <= 5 && !rawSym.endsWith("USD") && !rawSym.endsWith("JPY") ? rawSym + "USD" : rawSym;
+        const dir    = parts[2].toLowerCase();
+        const price  = parseFloat(parts[3]);
+
+        if (!["above","below"].includes(dir)) {
+          await reply("❌ Direction must be <b>above</b> or <b>below</b>.\nExample: <code>/alert BTCUSD above 67000</code>");
+          return json(res, 200, { ok: true });
+        }
+        if (isNaN(price) || price <= 0) {
+          await reply("❌ Invalid price. Example: <code>/alert BTCUSD above 67000</code>");
+          return json(res, 200, { ok: true });
+        }
+
+        // Check current price so user knows context
+        const curPrice = await getPrice(sym);
+        const dp = ["BTCUSD","ETHUSD","NAS100","SPX500","US30","XAUUSD"].includes(sym) ? 2 : sym.includes("JPY") ? 3 : 5;
+
+        if (!global._priceAlerts) global._priceAlerts = [];
+        const alert = {
+          id: Date.now().toString(),
+          sym, price, dir,
+          chatId,
+          triggered: false,
+          createdAt: new Date().toISOString(),
+          source: "telegram",
+        };
+        global._priceAlerts.push(alert);
+        console.log("[TELEGRAM-BOT] Alert set:", sym, dir, price, "by chatId:", chatId.slice(0,4)+"***");
+
+        const curLine = curPrice ? `\nCurrent price: $${curPrice.toFixed(dp)}` : "";
+        const dist    = curPrice ? ` (${dir === "above" ? "+" : "-"}${Math.abs(((price - curPrice) / curPrice) * 100).toFixed(2)}% away)` : "";
+        await reply([
+          "✅ <b>Alert Set!</b>",
+          "",
+          `📌 <b>${sym}</b> ${dir} <b>$${price}</b>${dist}`,
+          curLine,
+          "",
+          "I'll message you the moment it triggers.",
+          "View all alerts: <code>/alerts</code>",
+        ].filter(l => l !== null).join("\n"));
+
+        return json(res, 200, { ok: true });
+      }
+
+      // ── Unknown command ────────────────────────────────────────────────
+      await reply("❓ Unknown command.\n\nSend /help to see what I can do.");
+      return json(res, 200, { ok: true });
+
+    } catch(e) {
+      console.warn("[TELEGRAM-BOT] Webhook error:", e.message);
+      return json(res, 200, { ok: true }); // always 200 to Telegram
+    }
+  }
+
+  // GET /api/telegram/webhook/set — register webhook URL with Telegram
+  if (req.method === "GET" && url === "/api/telegram/webhook/set") {
+    try {
+      const bot = process.env.TELEGRAM_BOT_TOKEN || "";
+      if (!bot) return json(res, 200, { ok: false, error: "No bot token" });
+      const https = require("https");
+      const qs    = new URL(req.url, "http://localhost").searchParams;
+      const host  = qs.get("host") || "";
+      if (!host) return json(res, 400, { error: "host param required, e.g. ?host=tradeledger-server-production.up.railway.app" });
+      const webhookUrl = "https://" + host + "/api/telegram/webhook";
+      const setUrl = `https://api.telegram.org/bot${bot}/setWebhook?url=${encodeURIComponent(webhookUrl)}&allowed_updates=["message"]`;
+      const result = await new Promise((resolve) => {
+        https.get(setUrl, resp => {
+          let d = ""; resp.on("data", c => d += c);
+          resp.on("end", () => { try{resolve(JSON.parse(d));}catch{resolve({});} });
+        }).on("error", e => resolve({ ok: false, error: e.message }));
+      });
+      return json(res, 200, { ...result, webhookUrl });
+    } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
