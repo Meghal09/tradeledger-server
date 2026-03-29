@@ -747,6 +747,7 @@ function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analys
 
   return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:8}}>
+      {tvSym&&<TVModal symbol={tvSym} onClose={()=>setTvSym(null)}/>}
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
         <div style={{display:"flex",alignItems:"center",gap:10}}>
           <h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Watchlist</h1>
