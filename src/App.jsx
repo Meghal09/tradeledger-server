@@ -2193,7 +2193,7 @@ function JournalTab({trades}){
   };
 
   // Generate weekly coaching from journal entries
-  const genCoaching = () => {
+  const genCoaching = async () => {
     if(!entries.length) return;
     setCoachingLd(true);
     const wins = entries.filter(e=>e.outcome==="win");
