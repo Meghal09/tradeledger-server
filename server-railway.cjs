@@ -2496,6 +2496,92 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
     } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
   }
 
+
+  // GET /api/send-weekly-report?email=X — send weekly performance email
+  if (req.method === "GET" && url === "/api/send-weekly-report") {
+    try {
+      const qs = new URL(req.url, "http://localhost").searchParams;
+      const email = qs.get("email") || "";
+      const RESEND_KEY = process.env.RESEND_API_KEY || "";
+
+      if (!email) return json(res, 400, { error: "email param required" });
+
+      // Build stats from last 7 days of trades
+      const now = new Date();
+      const weekAgo = new Date(now - 7 * 86400000);
+      const recentTrades = (global._trades || []).filter(t => {
+        const d = t.closeTime ? new Date(t.closeTime.replace(/\./g,"-").replace(" ","T")) : null;
+        return d && d >= weekAgo;
+      });
+
+      const total = recentTrades.length;
+      if (!total && !RESEND_KEY) {
+        return json(res, 200, { ok: false, error: "No trades this week and no Resend key set" });
+      }
+
+      const wins = recentTrades.filter(t => (t.profit||0) > 0);
+      const pnl = recentTrades.reduce((s,t) => s+(t.profit||0)+(t.swap||0)+(t.commission||0), 0);
+      const wr = total ? Math.round(wins.length/total*100) : 0;
+      const best = recentTrades.reduce((b,t) => (t.profit||0) > (b.profit||0) ? t : b, recentTrades[0] || {});
+      const worst = recentTrades.reduce((w,t) => (t.profit||0) < (w.profit||0) ? t : w, recentTrades[0] || {});
+
+      const weekStr = weekAgo.toLocaleDateString("en-US",{month:"short",day:"numeric"}) + " – " + now.toLocaleDateString("en-US",{month:"short",day:"numeric"});
+      const pnlColor = pnl >= 0 ? "#00c48c" : "#ff5b5b";
+
+      const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<style>body{font-family:'Helvetica Neue',Arial,sans-serif;background:#f4f6f9;margin:0;padding:20px;}
+.wrap{max-width:560px;margin:0 auto;background:#fff;border-radius:16px;overflow:hidden;box-shadow:0 4px 24px rgba(0,0,0,.08);}
+.head{background:linear-gradient(135deg,#4f80ff,#00c48c);padding:28px 32px;color:#fff;}
+.head h1{margin:0;font-size:24px;font-weight:800;letter-spacing:-0.5px;}
+.head p{margin:6px 0 0;opacity:.85;font-size:14px;}
+.kpis{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;border-bottom:1px solid #f0f2f8;}
+.kpi{padding:20px;text-align:center;border-right:1px solid #f0f2f8;}
+.kpi:last-child{border-right:none;}
+.kpi-l{font-size:10px;color:#9ca3af;text-transform:uppercase;letter-spacing:.05em;margin-bottom:6px;}
+.kpi-v{font-size:22px;font-weight:800;font-family:'Courier New',monospace;}
+.body{padding:24px 32px;}
+.row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #f9fafb;font-size:13px;}
+.footer{background:#f9fafb;padding:16px 32px;font-size:11px;color:#9ca3af;text-align:center;}
+</style></head><body><div class="wrap">
+<div class="head"><h1>Weekly Trading Report</h1><p>${weekStr}</p></div>
+<div class="kpis">
+  <div class="kpi"><div class="kpi-l">Net P&L</div><div class="kpi-v" style="color:${pnlColor}">${pnl>=0?"+":""}$${pnl.toFixed(2)}</div></div>
+  <div class="kpi"><div class="kpi-l">Win Rate</div><div class="kpi-v" style="color:${wr>=50?"#00c48c":"#ff5b5b"}">${wr}%</div></div>
+  <div class="kpi"><div class="kpi-l">Trades</div><div class="kpi-v">${total}</div></div>
+</div>
+<div class="body">
+  ${best.symbol ? `<div class="row"><span>Best trade</span><span style="color:#00c48c;font-weight:700">${best.symbol} +$${(best.profit||0).toFixed(2)}</span></div>` : ""}
+  ${worst.symbol ? `<div class="row"><span>Worst trade</span><span style="color:#ff5b5b;font-weight:700">${worst.symbol} $${(worst.profit||0).toFixed(2)}</span></div>` : ""}
+  <div class="row"><span>Wins / Losses</span><span>${wins.length} / ${total-wins.length}</span></div>
+  <p style="color:#6b7280;font-size:13px;line-height:1.7;margin-top:16px">${pnl>=0?"Good week! Keep following your system and protect your gains going into next week.":"Tough week. Review your trades in the journal, identify patterns, and come back stronger."}</p>
+</div>
+<div class="footer">TradeLedger · Your personal MT5 trading journal · <a href="https://tradeledger-zeta.vercel.app">Open App</a></div>
+</div></body></html>`;
+
+      if (!RESEND_KEY) {
+        // No Resend key — return preview HTML
+        return json(res, 200, { ok: true, preview: true, html: html.slice(0,500)+"...", message: "Add RESEND_API_KEY to Railway to enable email sending. Preview generated." });
+      }
+
+      // Send via Resend
+      const https = require("https");
+      const payload = JSON.stringify({
+        from: "TradeLedger <reports@tradeledger.app>",
+        to: [email],
+        subject: `Weekly Report: ${pnl>=0?"+":""}$${pnl.toFixed(2)} P&L (${weekStr})`,
+        html,
+      });
+      const result = await new Promise((resolve) => {
+        const r = https.request({
+          hostname: "api.resend.com", path: "/emails",
+          method: "POST", headers: { "Authorization": "Bearer "+RESEND_KEY, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+        }, resp => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{resolve(JSON.parse(d));}catch{resolve({});} }); });
+        r.on("error",()=>resolve({error:"Network error"})); r.write(payload); r.end();
+      });
+      return json(res, 200, { ok: !result.error, id: result.id, error: result.error || null });
+    } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
+  }
+
   json(res, 404, { error: "Not found" });
 });
 
