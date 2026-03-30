@@ -36,6 +36,30 @@ function parseMT5Date(s){if(!s)return null;const d=new Date(String(s).replace(/\
 function mt5Day(s){const d=parseMT5Date(s);return d?d.toISOString().slice(0,10):null;}
 function mt5Hour(s){const d=parseMT5Date(s);return d?d.getUTCHours():null;}
 // localDay() — always returns YYYY-MM-DD in the user's LOCAL timezone (fixes UTC off-by-one)
+
+// ── SUPABASE CLIENT (frontend) ────────────────────────────────────────────
+const SB_URL = "https://kuhxmiofqwekgpvdinkx.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt1aHhtaW9mcXdla2dwdmRpbmt4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ4MDY1ODAsImV4cCI6MjA5MDM4MjU4MH0.aS6lPgFr7_ycVOajhJXmKTC4fd6D4pk7SgZP3NltpMs";
+const sbFetch = async (path, method="GET", body=null, extra={}) => {
+  const r = await fetch(SB_URL + "/rest/v1/" + path, {
+    method,
+    headers: {
+      "apikey": SB_KEY,
+      "Authorization": "Bearer " + SB_KEY,
+      "Content-Type": "application/json",
+      "Prefer": method==="POST"?"return=representation":"return=representation",
+      ...extra
+    },
+    ...(body ? { body: JSON.stringify(body) } : {})
+  });
+  return r.ok ? r.json() : null;
+};
+const sbSelect = (table, params="") => sbFetch(table + (params?"?"+params:""));
+const sbInsert = (table, row) => sbFetch(table, "POST", Array.isArray(row)?row:[row]);
+const sbUpdate = (table, row, filter) => sbFetch(table+"?"+filter, "PATCH", row);
+const sbDelete = (table, filter) => sbFetch(table+"?"+filter, "DELETE");
+const sbUpsert = (table, row) => sbFetch(table, "POST", Array.isArray(row)?row:[row], {"Prefer":"resolution=merge-duplicates,return=representation"});
+
 function localDay(d=new Date()){
   const dt=d instanceof Date?d:new Date(d);
   return dt.getFullYear()+"-"+String(dt.getMonth()+1).padStart(2,"0")+"-"+String(dt.getDate()).padStart(2,"0");
@@ -2071,19 +2095,50 @@ function NewsTab({savedNews,setSavedNews,fetchNews,newsLd,openArticle,searchQuer
 
 // ── JOURNAL ───────────────────────────────────────────────────
 function JournalTab({trades}){
-  const STORAGE_KEY = "tl_journal_entries";
   const [journalTvSym, setJournalTvSym]=useState(null);
-  const [entries, setEntries] = useState(()=>{
-    try{ return JSON.parse(localStorage.getItem(STORAGE_KEY)||"[]"); }catch{ return []; }
-  });
-  const [view, setView] = useState("list"); // "list"|"new"|"detail"|"coaching"
+  const [entries, setEntries] = useState([]);
+  const [entriesLoaded, setEntriesLoaded] = useState(false);
+  const [view, setView] = useState("list");
   const [selected, setSelected] = useState(null);
-  const [filter, setFilter] = useState("all"); // "all"|"win"|"loss"
+  const [filter, setFilter] = useState("all");
   const [search, setSearch] = useState("");
-  const [coaching, setCoaching] = useState(()=>{
-    try{ return JSON.parse(localStorage.getItem("tl_journal_coaching")||"null"); }catch{ return null; }
-  });
+  const [coaching, setCoaching] = useState(null);
   const [coachingLd, setCoachingLd] = useState(false);
+
+  // Load entries from Supabase on mount
+  useEffect(()=>{
+    const load = async () => {
+      try {
+        const data = await sbSelect("journal_entries", "order=created_at.desc");
+        if (data && Array.isArray(data)) {
+          // Map DB columns to app format
+          const mapped = data.map(e => ({
+            id: e.id, createdAt: e.created_at, date: e.date,
+            symbol: e.symbol, type: e.type, pnl: e.pnl,
+            outcome: e.outcome, setup: e.setup, reason: e.reason,
+            emotion: e.emotion, mistakes: e.mistakes, lessons: e.lessons,
+            rating: e.rating, tags: e.tags?e.tags.split(",").filter(Boolean):[],
+            needsReview: e.needs_review, reviewed: e.reviewed,
+            auto: e.auto, sourceTradeId: e.source_trade_id,
+          }));
+          setEntries(mapped);
+          // Load coaching if saved
+          const coachRow = await sbSelect("app_config", "key=eq.journal_coaching");
+          if (coachRow?.[0]?.value) {
+            try { setCoaching(JSON.parse(coachRow[0].value)); } catch {}
+          }
+        }
+      } catch(e) {
+        // Fallback to localStorage
+        try {
+          const local = JSON.parse(localStorage.getItem("tl_journal_entries")||"[]");
+          setEntries(local);
+        } catch {}
+      }
+      setEntriesLoaded(true);
+    };
+    load();
+  },[]);
 
   // Form state
   const EMPTY_FORM = {
@@ -2096,9 +2151,26 @@ function JournalTab({trades}){
   const [form, setForm] = useState(EMPTY_FORM);
   const fileRef = useRef();
 
-  const save = (entries) => {
-    setEntries(entries);
-    try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(entries)); }catch{}
+  const save = async (newEntries) => {
+    setEntries(newEntries);
+    // Sync to Supabase — upsert all changed entries
+    try {
+      const rows = newEntries.map(e => ({
+        id: e.id, created_at: e.createdAt||new Date().toISOString(),
+        date: e.date||"", symbol: e.symbol||"", type: e.type||"buy",
+        pnl: parseFloat(e.pnl)||0, outcome: e.outcome||"",
+        setup: e.setup||"", reason: e.reason||"", emotion: e.emotion||"",
+        mistakes: e.mistakes||"", lessons: e.lessons||"",
+        rating: parseInt(e.rating)||3,
+        tags: Array.isArray(e.tags)?e.tags.join(","):"",
+        needs_review: !!e.needsReview, reviewed: !!e.reviewed,
+        auto: !!e.auto, source_trade_id: e.sourceTradeId||"",
+      }));
+      await sbUpsert("journal_entries", rows);
+    } catch(err) {
+      // Fallback: save to localStorage
+      try { localStorage.setItem("tl_journal_entries", JSON.stringify(newEntries)); } catch {}
+    }
   };
 
   const submitEntry = () => {
@@ -2217,6 +2289,8 @@ function JournalTab({trades}){
     const result = { sections, generatedAt: new Date().toISOString(), tradeCount: entries.length };
     setCoaching(result);
     try{ localStorage.setItem("tl_journal_coaching", JSON.stringify(result)); }catch{}
+    // Also save to Supabase
+    try{ await sbUpsert("app_config", {key:"journal_coaching", value:JSON.stringify(result), updated_at:new Date().toISOString()}); }catch{}
     setCoachingLd(false);
     setView("coaching");
   };
@@ -2673,7 +2747,7 @@ function JournalTab({trades}){
         );
       })()}
 
-      {entries.length===0?(
+      {!entriesLoaded?<div style={{display:"flex",alignItems:"center",justifyContent:"center",padding:40,gap:10,color:T.textSub}}><Spinner size={16}/><span style={{fontSize:13}}>Loading journal from cloud...</span></div>:entries.length===0?(
         <div className="card" style={{padding:"48px 24px",textAlign:"center"}}>
           <div style={{fontSize:40,opacity:.15,marginBottom:16,fontWeight:800}}>J</div>
           <div style={{fontSize:16,fontWeight:600,color:T.text,marginBottom:8}}>Start your trading journal</div>
@@ -3698,6 +3772,7 @@ export default function TradeLedger(){
   // Auto-journal: called when new trades arrive via WebSocket
   const autoJournalNewTrades=useCallback((newTrades, oldIds)=>{
     const JKEY="tl_journal_entries";
+    // Get existing source IDs from localStorage as quick check (Supabase check happens on load)
     const existing=new Set(
       (()=>{try{return JSON.parse(localStorage.getItem(JKEY)||"[]");}catch{return[];}})()
         .map(e=>e.sourceTradeId)
@@ -3729,6 +3804,18 @@ export default function TradeLedger(){
     });
     const merged=[...newDrafts,...drafts];
     try{localStorage.setItem(JKEY,JSON.stringify(merged));}catch{}
+    // Also save new drafts to Supabase
+    try{
+      const rows=newDrafts.map(e=>({
+        id:e.id, created_at:e.createdAt||new Date().toISOString(),
+        date:e.date||"", symbol:e.symbol||"", type:e.type||"buy",
+        pnl:parseFloat(e.pnl)||0, outcome:e.outcome||"",
+        setup:"", reason:"", emotion:"", mistakes:"", lessons:"",
+        rating:3, tags:"", needs_review:true, reviewed:false,
+        auto:true, source_trade_id:e.sourceTradeId||"",
+      }));
+      sbInsert("journal_entries", rows).catch(()=>{});
+    }catch{}
     console.log("[JOURNAL] Auto-added "+newDrafts.length+" trade draft(s)");
     // Telegram notification for closed trades
     try{
