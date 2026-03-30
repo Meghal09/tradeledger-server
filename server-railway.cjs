@@ -2435,24 +2435,64 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
     }
   }
 
-  // GET /api/telegram/webhook/set — register webhook URL with Telegram
+  // GET /api/telegram/webhook/set — register webhook URL + menu button with Telegram
   if (req.method === "GET" && url === "/api/telegram/webhook/set") {
     try {
       const bot = process.env.TELEGRAM_BOT_TOKEN || "";
       if (!bot) return json(res, 200, { ok: false, error: "No bot token" });
       const https = require("https");
-      const qs    = new URL(req.url, "http://localhost").searchParams;
-      const host  = qs.get("host") || "";
-      if (!host) return json(res, 400, { error: "host param required, e.g. ?host=tradeledger-server-production.up.railway.app" });
+
+      const qs   = new URL(req.url, "http://localhost").searchParams;
+      const host = qs.get("host") || "tradeledger-server-production.up.railway.app";
+
       const webhookUrl = "https://" + host + "/api/telegram/webhook";
-      const setUrl = `https://api.telegram.org/bot${bot}/setWebhook?url=${encodeURIComponent(webhookUrl)}&allowed_updates=["message","callback_query"]`;
-      const result = await new Promise((resolve) => {
-        https.get(setUrl, resp => {
+
+      // Helper: POST to Telegram Bot API
+      const tgPost = (method, body) => new Promise((resolve) => {
+        const payload = JSON.stringify(body);
+        const r = https.request({
+          hostname: "api.telegram.org",
+          path: `/bot${bot}/${method}`,
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
+        }, resp => {
           let d = ""; resp.on("data", c => d += c);
-          resp.on("end", () => { try{resolve(JSON.parse(d));}catch{resolve({});} });
-        }).on("error", e => resolve({ ok: false, error: e.message }));
+          resp.on("end", () => { try{resolve(JSON.parse(d));}catch{resolve({ok:false});} });
+        });
+        r.on("error", () => resolve({ ok: false }));
+        r.write(payload); r.end();
       });
-      return json(res, 200, { ...result, webhookUrl });
+
+      // 1. Set webhook
+      const webhookResult = await tgPost("setWebhook", {
+        url: webhookUrl,
+        allowed_updates: ["message", "callback_query"]
+      });
+
+      // 2. Set bot commands (shows in menu)
+      await tgPost("setMyCommands", {
+        commands: [
+          { command: "menu",   description: "Open main menu" },
+          { command: "alerts", description: "View my active alerts" },
+          { command: "clear",  description: "Clear all alerts" },
+        ]
+      });
+
+      // 3. Set menu button — persistent button next to text input
+      const menuResult = await tgPost("setChatMenuButton", {
+        menu_button: {
+          type: "commands"   // shows the / commands list as a persistent button
+        }
+      });
+
+      console.log("[TELEGRAM] Webhook + menu button registered:", webhookUrl);
+      return json(res, 200, {
+        ok: webhookResult.ok,
+        webhookUrl,
+        webhookResult,
+        menuButtonResult: menuResult,
+        note: "Menu button enabled. Users tap the menu icon next to text input to access commands.",
+      });
     } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
   }
 
