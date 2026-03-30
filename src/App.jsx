@@ -4214,14 +4214,14 @@ export default function TradeLedger(){
 
           {/* Page — key fixes: overflowY:auto on content div, min-height:0 on flex chain */}
           <div style={{flex:1,overflowY:"auto",padding:"14px 16px 20px",paddingBottom:"calc(20px + env(safe-area-inset-bottom,0px))",minHeight:0}}>
-            {tab==="dashboard"&&<ErrorBoundary><DashboardTab trades={trades} stats={stats} serverOk={serverOk} lastSync={lastSync}/>}
-            {tab==="watchlist"&&<ErrorBoundary><WatchlistTab watchlist={watchlist} prices={prices} pFlash={pFlash} onAddSymbol={onAddSymbol} onRemoveSymbol={onRemoveSymbol} analyseSymbol={analyseSymbol} trades={trades}/>}
-            {tab==="analytics"&&<ErrorBoundary><AnalyticsTab trades={trades} stats={stats} weeklyAI={weeklyAI} genWeeklyAI={genWeeklyAI}/>}
-            {tab==="calendar"&&<ErrorBoundary><CalendarTab trades={trades} todayNews={todayNews}/>}
-            {tab==="news"&&<ErrorBoundary><NewsTab savedNews={savedNews} setSavedNews={setSavedNews} fetchNews={fetchNews} newsLd={newsLd} openArticle={openArticle} searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchResults={searchResults} searchLd={searchLd} searchErr={searchErr} fetchMarketSearch={fetchMarketSearch}/>}
-            {tab==="crypto"&&<ErrorBoundary><CryptoTab prices={prices} pFlash={pFlash} trades={trades} onAddSymbol={onAddSymbol}/>}
-            {tab==="journal"&&<ErrorBoundary><JournalTab trades={trades}/>}
-            {tab==="setup"&&<ErrorBoundary><SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit} goals={goals} setGoals={setGoals} accounts={accounts} setAccounts={setAccounts} activeAccount={activeAccount} setActiveAccount={setActiveAccount} prices={prices}/>}
+            {tab==="dashboard"&&<ErrorBoundary><DashboardTab trades={trades} stats={stats} serverOk={serverOk} lastSync={lastSync}/></ErrorBoundary>}
+            {tab==="watchlist"&&<ErrorBoundary><WatchlistTab watchlist={watchlist} prices={prices} pFlash={pFlash} onAddSymbol={onAddSymbol} onRemoveSymbol={onRemoveSymbol} analyseSymbol={analyseSymbol} trades={trades}/></ErrorBoundary>}
+            {tab==="analytics"&&<ErrorBoundary><AnalyticsTab trades={trades} stats={stats} weeklyAI={weeklyAI} genWeeklyAI={genWeeklyAI}/></ErrorBoundary>}
+            {tab==="calendar"&&<ErrorBoundary><CalendarTab trades={trades} todayNews={todayNews}/></ErrorBoundary>}
+            {tab==="news"&&<ErrorBoundary><NewsTab savedNews={savedNews} setSavedNews={setSavedNews} fetchNews={fetchNews} newsLd={newsLd} openArticle={openArticle} searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchResults={searchResults} searchLd={searchLd} searchErr={searchErr} fetchMarketSearch={fetchMarketSearch}/></ErrorBoundary>}
+            {tab==="crypto"&&<ErrorBoundary><CryptoTab prices={prices} pFlash={pFlash} trades={trades} onAddSymbol={onAddSymbol}/></ErrorBoundary>}
+            {tab==="journal"&&<ErrorBoundary><JournalTab trades={trades}/></ErrorBoundary>}
+            {tab==="setup"&&<ErrorBoundary><SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit} goals={goals} setGoals={setGoals} accounts={accounts} setAccounts={setAccounts} activeAccount={activeAccount} setActiveAccount={setActiveAccount} prices={prices}/></ErrorBoundary>}
           </div>
         </div>
       </div>
