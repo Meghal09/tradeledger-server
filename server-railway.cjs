@@ -2142,8 +2142,8 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
   }
 
 
-  // ── TELEGRAM WEBHOOK — receive messages from user ────────────────────────
-  // POST /api/telegram/webhook — Telegram sends every message here
+  // ── TELEGRAM WEBHOOK — interactive menu with inline keyboards ────────────
+  // POST /api/telegram/webhook — receives messages & button callbacks
   if (req.method === "POST" && url === "/api/telegram/webhook") {
     try {
       const body = await new Promise(resolve => {
@@ -2151,218 +2151,287 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
         req.on("end", () => { try{resolve(JSON.parse(d));}catch{resolve({});} });
       });
 
-      const msg   = body?.message;
-      if (!msg) return json(res, 200, { ok: true });
+      const bot      = process.env.TELEGRAM_BOT_TOKEN || "";
+      if (!bot) return json(res, 200, { ok: true });
 
-      const chatId  = String(msg.chat?.id || "");
-      const text    = (msg.text || "").trim();
-      const bot     = process.env.TELEGRAM_BOT_TOKEN || "";
-      if (!bot || !chatId) return json(res, 200, { ok: true });
+      const msg      = body?.message;
+      const callback = body?.callback_query;
+      const chatId   = String(msg?.chat?.id || callback?.message?.chat?.id || "");
+      const text     = (msg?.text || "").trim();
+      const callData = callback?.data || "";
+      const callId   = callback?.id || "";
+      if (!chatId) return json(res, 200, { ok: true });
 
-      // Save chatId automatically when user messages the bot
-      if (chatId) {
-        global._telegramChatId = chatId;
-      }
+      // Persist chatId
+      global._telegramChatId = chatId;
+      sb.setConfig("telegram_chat_id", chatId).catch(() => {});
 
-      // Helper: reply to this chat
-      const reply = async (replyText) => {
-        const https = require("https");
-        const payload = JSON.stringify({ chat_id: chatId, text: replyText, parse_mode: "HTML" });
-        return new Promise((resolve) => {
-          const r = https.request({
-            hostname: "api.telegram.org",
-            path: `/bot${bot}/sendMessage`,
-            method: "POST",
-            headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload) }
-          }, resp => { resp.resume(); resolve(); });
-          r.on("error", () => resolve());
-          r.write(payload); r.end();
-        });
-      };
+      const https = require("https");
 
-      // Helper: fetch current price for a symbol
+      // ── Send helpers ────────────────────────────────────────────────────
+      const sendMsg = (payload) => new Promise((resolve) => {
+        const p = JSON.stringify({ chat_id: chatId, parse_mode: "HTML", ...payload });
+        const r = https.request({
+          hostname: "api.telegram.org", path: `/bot${bot}/sendMessage`,
+          method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(p) }
+        }, resp => { resp.resume(); resolve(); });
+        r.on("error", () => resolve()); r.write(p); r.end();
+      });
+
+      const answerCB = (txt = "") => new Promise((resolve) => {
+        if (!callId) { resolve(); return; }
+        const p = JSON.stringify({ callback_query_id: callId, text: txt });
+        const r = https.request({
+          hostname: "api.telegram.org", path: `/bot${bot}/answerCallbackQuery`,
+          method: "POST", headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(p) }
+        }, resp => { resp.resume(); resolve(); });
+        r.on("error", () => resolve()); r.write(p); r.end();
+      });
+
+      const reply = (t) => sendMsg({ text: t });
+
+      // ── State machine ───────────────────────────────────────────────────
+      if (!global._botState) global._botState = {};
+      const state     = global._botState[chatId] || {};
+      const setState  = (s) => { global._botState[chatId] = { ...state, ...s }; };
+      const clearState = () => { delete global._botState[chatId]; };
+
+      // ── Price helper ────────────────────────────────────────────────────
       const getPrice = async (sym) => {
-        const https = require("https");
         const TD_KEY = process.env.TWELVE_DATA_KEY || "";
         if (!TD_KEY) return null;
-        const TD_MAP = {
-          "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","XAUUSD":"XAU/USD",
+        const MAP = {
+          "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
+          "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","GBPJPY":"GBP/JPY",
+          "EURJPY":"EUR/JPY","EURGBP":"EUR/GBP","XAUUSD":"XAU/USD","XAGUSD":"XAG/USD",
           "BTCUSD":"BTC/USD","ETHUSD":"ETH/USD","SOLUSD":"SOL/USD","BNBUSD":"BNB/USD",
           "NAS100":"NDX","SPX500":"SPX","US30":"DJI","USOIL":"WTI",
-          "AUDUSD":"AUD/USD","NZDUSD":"NZD/USD","USDCAD":"USD/CAD","GBPJPY":"GBP/JPY",
         };
-        const tdSym = TD_MAP[sym] || sym;
         return new Promise((resolve) => {
           const r = https.request({
-            hostname: "api.twelvedata.com",
-            path: "/price?symbol=" + encodeURIComponent(tdSym) + "&apikey=" + TD_KEY + "&dp=5",
-            method: "GET", timeout: 8000,
-            headers: { "User-Agent": "TradeLedger/1.0" }
+            hostname:"api.twelvedata.com",
+            path:"/price?symbol="+encodeURIComponent(MAP[sym]||sym)+"&apikey="+TD_KEY+"&dp=5",
+            method:"GET", timeout:8000, headers:{"User-Agent":"TradeLedger/1.0"}
           }, resp => {
-            let d = ""; resp.on("data", c => d += c);
-            resp.on("end", () => {
-              try {
-                const p = JSON.parse(d);
-                resolve(p?.price ? parseFloat(p.price) : null);
-              } catch { resolve(null); }
-            });
+            let d=""; resp.on("data",c=>d+=c);
+            resp.on("end",()=>{ try{resolve(parseFloat(JSON.parse(d).price)||null);}catch{resolve(null);} });
           });
-          r.on("error", () => resolve(null));
-          r.on("timeout", () => { r.destroy(); resolve(null); });
-          r.end();
+          r.on("error",()=>resolve(null)); r.on("timeout",()=>{r.destroy();resolve(null);}); r.end();
+        });
+      };
+      const fmt = (p,sym) => !p?"?" : ["BTCUSD","ETHUSD","NAS100","SPX500","US30","XAUUSD"].includes(sym)?p.toFixed(2):sym.includes("JPY")?p.toFixed(3):p.toFixed(5);
+
+      // ── Menus ───────────────────────────────────────────────────────────
+      const mainMenu = () => sendMsg({
+        text: "<b>TradeLedger</b>\nWhat would you like to do?",
+        reply_markup: { inline_keyboard: [
+          [{ text:"🔔 Set Price Alert", callback_data:"m_alert" }, { text:"📋 My Alerts", callback_data:"m_list" }],
+          [{ text:"💰 Check Price",     callback_data:"m_price" }, { text:"📊 Dashboard",  callback_data:"m_dash"  }],
+          [{ text:"🗑 Clear All Alerts",callback_data:"m_clear" }],
+        ]}
+      });
+
+      const symMenu = (header) => sendMsg({
+        text: header || "<b>Select a symbol:</b>",
+        reply_markup: { inline_keyboard: [
+          [{ text:"BTC",    callback_data:"s_BTCUSD"  },{ text:"ETH",    callback_data:"s_ETHUSD"  },{ text:"SOL",    callback_data:"s_SOLUSD"  },{ text:"BNB",   callback_data:"s_BNBUSD"  }],
+          [{ text:"GOLD",   callback_data:"s_XAUUSD"  },{ text:"SILVER", callback_data:"s_XAGUSD"  },{ text:"OIL",    callback_data:"s_USOIL"   },{ text:"NAS100",callback_data:"s_NAS100"  }],
+          [{ text:"EURUSD", callback_data:"s_EURUSD"  },{ text:"GBPUSD", callback_data:"s_GBPUSD"  },{ text:"USDJPY", callback_data:"s_USDJPY"  },{ text:"USDCHF",callback_data:"s_USDCHF"  }],
+          [{ text:"AUDUSD", callback_data:"s_AUDUSD"  },{ text:"USDCAD", callback_data:"s_USDCAD"  },{ text:"GBPJPY", callback_data:"s_GBPJPY"  },{ text:"SPX500",callback_data:"s_SPX500"  }],
+          [{ text:"✏️ Other (type symbol)", callback_data:"s_custom" }],
+          [{ text:"⬅️ Back to Menu", callback_data:"m_back" }],
+        ]}
+      });
+
+      const dirMenu = async (sym) => {
+        const cur = await getPrice(sym);
+        const note = cur ? `\nCurrent: <b>$${fmt(cur,sym)}</b>` : "";
+        return sendMsg({
+          text: `<b>${sym}</b>${note}\n\nAlert when price goes:`,
+          reply_markup: { inline_keyboard: [
+            [{ text:"📈 Above a price level", callback_data:"d_above" }],
+            [{ text:"📉 Below a price level", callback_data:"d_below" }],
+            [{ text:"⬅️ Back", callback_data:"m_alert" }],
+          ]}
         });
       };
 
-      const cmd = text.toLowerCase();
+      // ── CALLBACK BUTTON HANDLER ─────────────────────────────────────────
+      if (callData) {
+        await answerCB();
 
-      // ── /start or /help ────────────────────────────────────────────────
-      if (cmd === "/start" || cmd === "/help") {
-        await reply([
-          "👋 <b>TradeLedger Bot</b>",
-          "",
-          "Commands you can send me:",
-          "",
-          "📌 <b>Set a price alert:</b>",
-          "<code>/alert BTCUSD above 67000</code>",
-          "<code>/alert XAUUSD below 3100</code>",
-          "<code>/alert EURUSD above 1.09500</code>",
-          "",
-          "📋 <b>List your alerts:</b>",
-          "<code>/alerts</code>",
-          "",
-          "💰 <b>Get current price:</b>",
-          "<code>/price BTCUSD</code>",
-          "<code>/price XAUUSD</code>",
-          "",
-          "🗑 <b>Remove an alert:</b>",
-          "<code>/remove 1</code> (use number from /alerts list)",
-          "",
-          "❌ <b>Clear all alerts:</b>",
-          "<code>/clear</code>",
-        ].join("\n"));
-        return json(res, 200, { ok: true });
+        if (callData === "m_back" || callData === "m_main") { clearState(); await mainMenu(); return json(res, 200, { ok:true }); }
+
+        if (callData === "m_alert") {
+          setState({ step:"sym" });
+          await symMenu("<b>Set Price Alert</b>\n\nChoose a symbol:");
+          return json(res, 200, { ok:true });
+        }
+
+        if (callData === "m_price") {
+          setState({ step:"sym_price" });
+          await symMenu("<b>Check Live Price</b>\n\nChoose a symbol:");
+          return json(res, 200, { ok:true });
+        }
+
+        if (callData === "m_list") {
+          const active = (global._priceAlerts||[]).filter(a=>!a.triggered);
+          if (!active.length) {
+            await sendMsg({ text:"📋 No active alerts.", reply_markup:{inline_keyboard:[[{text:"🔔 Set Alert",callback_data:"m_alert"},{text:"⬅️ Menu",callback_data:"m_main"}]]} });
+          } else {
+            const lines = ["📋 <b>Your Active Alerts:</b>\n"];
+            active.forEach((a,i) => lines.push(`${i+1}. <b>${a.sym}</b> ${a.dir==="above"?"📈 above":"📉 below"} $${a.price}`));
+            const rmBtns = active.map(a=>[{text:`❌ Remove: ${a.sym} ${a.dir} $${a.price}`, callback_data:`rm_${a.id}`}]);
+            await sendMsg({ text:lines.join("\n"), reply_markup:{inline_keyboard:[...rmBtns,[{text:"➕ Add Alert",callback_data:"m_alert"},{text:"⬅️ Menu",callback_data:"m_main"}]]} });
+          }
+          return json(res, 200, { ok:true });
+        }
+
+        if (callData === "m_clear") {
+          const n = (global._priceAlerts||[]).filter(a=>!a.triggered).length;
+          try { await sb.delete("price_alerts",{triggered:"eq.false"}); } catch{}
+          global._priceAlerts = [];
+          clearState();
+          await sendMsg({ text:`🗑 Cleared ${n} alert${n!==1?"s":""}.`, reply_markup:{inline_keyboard:[[{text:"🔔 Set Alert",callback_data:"m_alert"},{text:"⬅️ Menu",callback_data:"m_main"}]]} });
+          return json(res, 200, { ok:true });
+        }
+
+        if (callData === "m_dash") {
+          const t = global._trades || [];
+          const td = new Date().toISOString().slice(0,10);
+          const tod = t.filter(x=>(x.closeTime||"").slice(0,10)===td);
+          const pnl = tod.reduce((s,x)=>s+(x.profit||0)+(x.swap||0)+(x.commission||0),0);
+          const alerts = (global._priceAlerts||[]).filter(a=>!a.triggered).length;
+          await sendMsg({ text:[
+            "📊 <b>Dashboard</b>","",
+            `Today P&L: <b>${pnl>=0?"+":""}$${pnl.toFixed(2)}</b>`,
+            `Today trades: <b>${tod.length}</b>`,
+            `Active alerts: <b>${alerts}</b>`,
+            `Time: <b>${new Date().toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",timeZone:"UTC"})} UTC</b>`,
+          ].join("\n"), reply_markup:{inline_keyboard:[[{text:"⬅️ Menu",callback_data:"m_main"}]]} });
+          return json(res, 200, { ok:true });
+        }
+
+        // Symbol selected
+        if (callData.startsWith("s_")) {
+          const sym = callData.slice(2);
+          if (sym === "custom") {
+            setState({ step: state.step==="sym_price" ? "await_sym_price" : "await_sym" });
+            await reply("✏️ Type the symbol (e.g. EURJPY, BNBUSD, XAGUSD):");
+            return json(res, 200, { ok:true });
+          }
+          if (state.step === "sym_price") {
+            const cur = await getPrice(sym);
+            await sendMsg({ text: cur?`💰 <b>${sym}</b>: <b>$${fmt(cur,sym)}</b>`:`❌ Could not fetch price for ${sym}`,
+              reply_markup:{inline_keyboard:[[{text:`🔔 Alert for ${sym}`,callback_data:`s_${sym}`},{text:"⬅️ Menu",callback_data:"m_main"}]]}
+            });
+            setState({ step:"sym" }); // if they tap alert next
+            return json(res, 200, { ok:true });
+          }
+          setState({ step:"dir", sym });
+          await dirMenu(sym);
+          return json(res, 200, { ok:true });
+        }
+
+        // Direction selected
+        if (callData === "d_above" || callData === "d_below") {
+          const sym = state.sym;
+          if (!sym) { clearState(); await mainMenu(); return json(res, 200, { ok:true }); }
+          const dir = callData === "d_above" ? "above" : "below";
+          setState({ step:"await_price", sym, dir });
+          const cur = await getPrice(sym);
+          const ex = cur ? (dir==="above"?(cur*1.02).toFixed(cur>100?2:5):(cur*0.98).toFixed(cur>100?2:5)) : "67000";
+          const note = cur ? ` (now $${fmt(cur,sym)})` : "";
+          await reply(`<b>${sym}</b> ${dir==="above"?"📈 above":"📉 below"} what price?${note}\n\nType the number, e.g. <code>${ex}</code>`);
+          return json(res, 200, { ok:true });
+        }
+
+        // Remove alert
+        if (callData.startsWith("rm_")) {
+          const id = callData.slice(3);
+          try { await sb.delete("price_alerts",{id:"eq."+id}); } catch{}
+          global._priceAlerts = (global._priceAlerts||[]).filter(a=>a.id!==id);
+          await answerCB("Removed!");
+          // Refresh list
+          const active = (global._priceAlerts||[]).filter(a=>!a.triggered);
+          if (!active.length) {
+            await sendMsg({ text:"✅ Removed. No more active alerts.", reply_markup:{inline_keyboard:[[{text:"🔔 Set Alert",callback_data:"m_alert"},{text:"⬅️ Menu",callback_data:"m_main"}]]} });
+          } else {
+            const lines=["📋 <b>Alerts:</b>\n"];
+            active.forEach((a,i)=>lines.push(`${i+1}. <b>${a.sym}</b> ${a.dir==="above"?"📈":"📉"} $${a.price}`));
+            const rmBtns=active.map(a=>[{text:`❌ ${a.sym} ${a.dir} $${a.price}`,callback_data:`rm_${a.id}`}]);
+            await sendMsg({text:lines.join("\n"),reply_markup:{inline_keyboard:[...rmBtns,[{text:"⬅️ Menu",callback_data:"m_main"}]]}});
+          }
+          return json(res, 200, { ok:true });
+        }
+
+        return json(res, 200, { ok:true });
       }
 
-      // ── /alerts — list active alerts ───────────────────────────────────
-      if (cmd === "/alerts") {
-        const active = (global._priceAlerts || []).filter(a => !a.triggered);
-        if (!active.length) {
-          await reply("📋 No active price alerts.\n\nSet one with:\n<code>/alert BTCUSD above 67000</code>");
+      // ── TEXT MESSAGE HANDLER ────────────────────────────────────────────
+
+      if (state.step === "await_sym" || state.step === "await_sym_price") {
+        const raw = text.toUpperCase().replace("/","");
+        const sym = raw.length<=5&&!raw.endsWith("USD")&&!raw.endsWith("JPY")&&!raw.endsWith("GBP")?raw+"USD":raw;
+        if (state.step === "await_sym_price") {
+          const cur = await getPrice(sym);
+          clearState();
+          await sendMsg({text:cur?`💰 <b>${sym}</b>: $${fmt(cur,sym)}`:`❌ No price for ${sym}`, reply_markup:{inline_keyboard:[[{text:"🔔 Alert",callback_data:"s_"+sym},{text:"⬅️ Menu",callback_data:"m_main"}]]}});
         } else {
-          const lines = ["📋 <b>Your Active Alerts:</b>", ""];
-          active.forEach((a, i) => {
-            lines.push(`${i+1}. <b>${a.sym}</b> ${a.dir} $${a.price}`);
-          });
-          lines.push("", "Remove with: <code>/remove 1</code>");
-          await reply(lines.join("\n"));
+          setState({ step:"dir", sym });
+          await dirMenu(sym);
         }
-        return json(res, 200, { ok: true });
+        return json(res, 200, { ok:true });
       }
 
-      // ── /clear — remove all alerts ─────────────────────────────────────
-      if (cmd === "/clear") {
-        const count = (global._priceAlerts || []).filter(a => !a.triggered).length;
-        global._priceAlerts = [];
-        await reply(`🗑 Cleared all ${count} alert${count !== 1 ? "s" : ""}.`);
-        return json(res, 200, { ok: true });
-      }
-
-      // ── /remove N — remove alert by number ────────────────────────────
-      if (cmd.startsWith("/remove ")) {
-        const n = parseInt(cmd.split(" ")[1]);
-        const active = (global._priceAlerts || []).filter(a => !a.triggered);
-        if (isNaN(n) || n < 1 || n > active.length) {
-          await reply("❌ Invalid number. Use <code>/alerts</code> to see your list.");
-        } else {
-          const target = active[n - 1];
-          global._priceAlerts = (global._priceAlerts || []).filter(a => a.id !== target.id);
-          await reply(`✅ Removed alert: <b>${target.sym}</b> ${target.dir} $${target.price}`);
+      if (state.step === "await_price") {
+        const price = parseFloat(text.replace(/[,$\s]/g,""));
+        if (isNaN(price)||price<=0) {
+          await reply("❌ Invalid price. Just type the number, e.g. <code>67000</code>");
+          return json(res, 200, { ok:true });
         }
-        return json(res, 200, { ok: true });
-      }
-
-      // ── /price SYM — get current price ────────────────────────────────
-      if (cmd.startsWith("/price ")) {
-        const rawSym = cmd.split(" ")[1]?.toUpperCase().replace("/","") || "";
-        const sym = rawSym.length <= 5 && !rawSym.endsWith("USD") && !rawSym.endsWith("JPY") ? rawSym + "USD" : rawSym;
-        const price = await getPrice(sym);
-        if (!price) {
-          await reply(`❌ Could not fetch price for <b>${sym}</b>.\n\nTry: BTCUSD, EURUSD, XAUUSD, NAS100`);
-        } else {
-          const dp = ["BTCUSD","ETHUSD","NAS100","SPX500","US30","XAUUSD"].includes(sym) ? 2 : sym.includes("JPY") ? 3 : 5;
-          await reply(`💰 <b>${sym}</b>\nCurrent price: <b>$${price.toFixed(dp)}</b>`);
-        }
-        return json(res, 200, { ok: true });
-      }
-
-      // ── /alert SYM above|below PRICE ──────────────────────────────────
-      if (cmd.startsWith("/alert ")) {
-        const parts = text.trim().split(/\s+/);
-        // /alert BTCUSD above 67000
-        if (parts.length < 4) {
-          await reply("❌ Format: <code>/alert BTCUSD above 67000</code>\nor: <code>/alert EURUSD below 1.08500</code>");
-          return json(res, 200, { ok: true });
-        }
-        const rawSym = parts[1].toUpperCase().replace("/","");
-        const sym    = rawSym.length <= 5 && !rawSym.endsWith("USD") && !rawSym.endsWith("JPY") ? rawSym + "USD" : rawSym;
-        const dir    = parts[2].toLowerCase();
-        const price  = parseFloat(parts[3]);
-
-        if (!["above","below"].includes(dir)) {
-          await reply("❌ Direction must be <b>above</b> or <b>below</b>.\nExample: <code>/alert BTCUSD above 67000</code>");
-          return json(res, 200, { ok: true });
-        }
-        if (isNaN(price) || price <= 0) {
-          await reply("❌ Invalid price. Example: <code>/alert BTCUSD above 67000</code>");
-          return json(res, 200, { ok: true });
-        }
-
-        // Check current price so user knows context
-        const curPrice = await getPrice(sym);
-        const dp = ["BTCUSD","ETHUSD","NAS100","SPX500","US30","XAUUSD"].includes(sym) ? 2 : sym.includes("JPY") ? 3 : 5;
-
+        const { sym, dir } = state;
+        clearState();
+        const id = Date.now().toString();
+        const alert = { id, sym, price, dir, chatId, triggered:false, createdAt:new Date().toISOString(), source:"telegram" };
         if (!global._priceAlerts) global._priceAlerts = [];
-        const alert = {
-          id: Date.now().toString(),
-          sym, price, dir,
-          chatId,
-          triggered: false,
-          createdAt: new Date().toISOString(),
-          source: "telegram",
-        };
         global._priceAlerts.push(alert);
-        // Save to Supabase
-        try {
-          await sb.insert("price_alerts", {
-            id: alert.id, sym: alert.sym, price: alert.price, dir: alert.dir,
-            chat_id: alert.chatId, triggered: false,
-            created_at: alert.createdAt, source: "telegram"
-          });
-        } catch(e) { console.warn("[SB] Telegram alert save error:", e.message); }
-        console.log("[TELEGRAM-BOT] Alert set:", sym, dir, price, "by chatId:", chatId.slice(0,4)+"***");
-
-        const curLine = curPrice ? `\nCurrent price: $${curPrice.toFixed(dp)}` : "";
-        const dist    = curPrice ? ` (${dir === "above" ? "+" : "-"}${Math.abs(((price - curPrice) / curPrice) * 100).toFixed(2)}% away)` : "";
-        await reply([
-          "✅ <b>Alert Set!</b>",
-          "",
-          `📌 <b>${sym}</b> ${dir} <b>$${price}</b>${dist}`,
-          curLine,
-          "",
-          "I'll message you the moment it triggers.",
-          "View all alerts: <code>/alerts</code>",
-        ].filter(l => l !== null).join("\n"));
-
-        return json(res, 200, { ok: true });
+        try { await sb.insert("price_alerts",{id,sym,price,dir,chat_id:chatId,triggered:false,created_at:alert.createdAt,source:"telegram"}); } catch{}
+        const cur = await getPrice(sym);
+        const dist = cur?` (${Math.abs(((price-cur)/cur)*100).toFixed(2)}% away)`:"";
+        await sendMsg({
+          text:["✅ <b>Alert Set!</b>","",`📌 <b>${sym}</b> ${dir==="above"?"📈 above":"📉 below"} <b>$${price}</b>${dist}`,cur?`Now: $${fmt(cur,sym)}`:"","I'll message you when it triggers."].filter(Boolean).join("\n"),
+          reply_markup:{inline_keyboard:[[{text:"➕ Another Alert",callback_data:"m_alert"},{text:"📋 View All",callback_data:"m_list"}],[{text:"⬅️ Menu",callback_data:"m_main"}]]}
+        });
+        return json(res, 200, { ok:true });
       }
 
-      // ── Unknown command ────────────────────────────────────────────────
-      await reply("❓ Unknown command.\n\nSend /help to see what I can do.");
-      return json(res, 200, { ok: true });
+      // Commands
+      const cmd = text.toLowerCase();
+      if (cmd==="/start"||cmd==="/menu"||cmd==="/help") { clearState(); await mainMenu(); return json(res,200,{ok:true}); }
+      if (cmd==="/alerts") {
+        const active=(global._priceAlerts||[]).filter(a=>!a.triggered);
+        const rmBtns=active.map(a=>[{text:`❌ ${a.sym} ${a.dir} $${a.price}`,callback_data:`rm_${a.id}`}]);
+        const lines=active.length?["📋 <b>Alerts:</b>\n",...active.map((a,i)=>`${i+1}. <b>${a.sym}</b> ${a.dir==="above"?"📈":"📉"} $${a.price}`)]:"📋 No active alerts.";
+        await sendMsg({text:Array.isArray(lines)?lines.join("\n"):lines, reply_markup:{inline_keyboard:[...rmBtns,[{text:"➕ Add",callback_data:"m_alert"},{text:"⬅️ Menu",callback_data:"m_main"}]]}});
+        return json(res,200,{ok:true});
+      }
+      if (cmd.startsWith("/price ")) {
+        const raw=cmd.split(" ")[1]?.toUpperCase().replace("/","")||"";
+        const sym=raw.length<=5&&!raw.endsWith("USD")&&!raw.endsWith("JPY")?raw+"USD":raw;
+        const cur=await getPrice(sym);
+        await sendMsg({text:cur?`💰 <b>${sym}</b>: $${fmt(cur,sym)}`:`❌ No price for ${sym}`,reply_markup:{inline_keyboard:[[{text:"🔔 Alert",callback_data:"s_"+sym},{text:"⬅️ Menu",callback_data:"m_main"}]]}});
+        return json(res,200,{ok:true});
+      }
+
+      // Default — show menu
+      clearState();
+      await mainMenu();
+      return json(res, 200, { ok:true });
 
     } catch(e) {
       console.warn("[TELEGRAM-BOT] Webhook error:", e.message);
-      return json(res, 200, { ok: true }); // always 200 to Telegram
+      return json(res, 200, { ok: true });
     }
   }
 
@@ -2376,7 +2445,7 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
       const host  = qs.get("host") || "";
       if (!host) return json(res, 400, { error: "host param required, e.g. ?host=tradeledger-server-production.up.railway.app" });
       const webhookUrl = "https://" + host + "/api/telegram/webhook";
-      const setUrl = `https://api.telegram.org/bot${bot}/setWebhook?url=${encodeURIComponent(webhookUrl)}&allowed_updates=["message"]`;
+      const setUrl = `https://api.telegram.org/bot${bot}/setWebhook?url=${encodeURIComponent(webhookUrl)}&allowed_updates=["message","callback_query"]`;
       const result = await new Promise((resolve) => {
         https.get(setUrl, resp => {
           let d = ""; resp.on("data", c => d += c);
