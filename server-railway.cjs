@@ -8,6 +8,125 @@ const http = require("http");
 const fs   = require("fs");
 const path = require("path");
 
+// ── SUPABASE CLIENT ──────────────────────────────────────────────────────
+const SUPABASE_URL = process.env.SUPABASE_URL || "https://kuhxmiofqwekgpvdinkx.supabase.co";
+const SUPABASE_KEY = process.env.SUPABASE_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imt1aHhtaW9mcXdla2dwdmRpbmt4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ4MDY1ODAsImV4cCI6MjA5MDM4MjU4MH0.aS6lPgFr7_ycVOajhJXmKTC4fd6D4pk7SgZP3NltpMs";
+
+const sb = {
+  // Generic REST call to Supabase PostgREST
+  async query(table, method, body, params) {
+    const https = require("https");
+    const url = new URL(`${SUPABASE_URL}/rest/v1/${table}`);
+    if (params) Object.entries(params).forEach(([k,v]) => url.searchParams.set(k,v));
+    const payload = body ? JSON.stringify(body) : null;
+    return new Promise((resolve, reject) => {
+      const opts = {
+        hostname: url.hostname, path: url.pathname + url.search,
+        method, timeout: 10000,
+        headers: {
+          "apikey": SUPABASE_KEY,
+          "Authorization": "Bearer " + SUPABASE_KEY,
+          "Content-Type": "application/json",
+          "Prefer": method === "POST" ? "return=representation" : "return=representation",
+        }
+      };
+      if (payload) opts.headers["Content-Length"] = Buffer.byteLength(payload);
+      const r = https.request(opts, resp => {
+        let d = ""; resp.on("data", c => d += c);
+        resp.on("end", () => {
+          try { resolve({ status: resp.statusCode, data: d ? JSON.parse(d) : null }); }
+          catch { resolve({ status: resp.statusCode, data: d }); }
+        });
+      });
+      r.on("error", reject);
+      r.on("timeout", () => { r.destroy(); reject(new Error("Supabase timeout")); });
+      if (payload) r.write(payload);
+      r.end();
+    });
+  },
+
+  // SELECT rows
+  async select(table, params) {
+    return this.query(table, "GET", null, params);
+  },
+
+  // INSERT row(s) — returns inserted rows
+  async insert(table, row) {
+    return this.query(table, "POST", Array.isArray(row) ? row : [row]);
+  },
+
+  // UPDATE matching rows
+  async update(table, row, params) {
+    return this.query(table, "PATCH", row, params);
+  },
+
+  // DELETE matching rows
+  async delete(table, params) {
+    return this.query(table, "DELETE", null, params);
+  },
+
+  // Upsert (insert or update)
+  async upsert(table, row) {
+    const https = require("https");
+    const url = `${SUPABASE_URL}/rest/v1/${table}`;
+    const payload = JSON.stringify(Array.isArray(row) ? row : [row]);
+    return new Promise((resolve, reject) => {
+      const u = new URL(url);
+      const r = https.request({
+        hostname: u.hostname, path: u.pathname, method: "POST", timeout: 10000,
+        headers: {
+          "apikey": SUPABASE_KEY, "Authorization": "Bearer " + SUPABASE_KEY,
+          "Content-Type": "application/json", "Prefer": "resolution=merge-duplicates,return=representation",
+          "Content-Length": Buffer.byteLength(payload)
+        }
+      }, resp => { let d=""; resp.on("data",c=>d+=c); resp.on("end",()=>{ try{resolve({status:resp.statusCode,data:JSON.parse(d)})}catch{resolve({status:resp.statusCode,data:d})}}); });
+      r.on("error",reject); r.on("timeout",()=>{r.destroy();reject(new Error("timeout"));});
+      r.write(payload); r.end();
+    });
+  },
+
+  // Get config value
+  async getConfig(key) {
+    try {
+      const r = await this.select("app_config", { key: `eq.${key}`, select: "value" });
+      return r.data?.[0]?.value || null;
+    } catch { return null; }
+  },
+
+  // Set config value
+  async setConfig(key, value) {
+    try {
+      await this.upsert("app_config", { key, value, updated_at: new Date().toISOString() });
+    } catch(e) { console.warn("[SB] setConfig error:", e.message); }
+  }
+};
+
+// Load persisted state from Supabase on boot
+async function loadPersistedState() {
+  try {
+    // Load price alerts
+    const alertsRes = await sb.select("price_alerts", { triggered: "eq.false" });
+    if (alertsRes.data && Array.isArray(alertsRes.data)) {
+      global._priceAlerts = alertsRes.data.map(a => ({
+        id: a.id, sym: a.sym, price: a.price, dir: a.dir,
+        chatId: a.chat_id, triggered: a.triggered,
+        createdAt: a.created_at, source: a.source || "app"
+      }));
+      console.log("[SB] Loaded", global._priceAlerts.length, "active price alerts from Supabase");
+    }
+    // Load telegram chat ID
+    const chatId = await sb.getConfig("telegram_chat_id");
+    if (chatId) {
+      global._telegramChatId = chatId;
+      console.log("[SB] Loaded Telegram chat ID from Supabase");
+    }
+  } catch(e) {
+    console.warn("[SB] loadPersistedState error:", e.message);
+  }
+}
+
+
+
 // ─── AI helper — OpenRouter (free tier, OpenAI-compatible format) ────────────
 // Get free key at openrouter.ai — set OPENROUTER_API_KEY in Railway Variables
 // Free models: meta-llama/llama-3.3-8b-instruct:free  (fast, good quality)
@@ -1921,7 +2040,9 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
       const chatId = body.chatId || "";
       if (!chatId) return json(res, 400, { error: "chatId required" });
       global._telegramChatId = chatId;
-      console.log("[TELEGRAM] Chat ID saved for scheduler:", chatId.slice(0,3)+"***");
+      // Persist to Supabase so it survives Railway restarts
+      try { await sb.setConfig("telegram_chat_id", chatId); } catch(e) {}
+      console.log("[TELEGRAM] Chat ID saved to Supabase:", chatId.slice(0,3)+"***");
       return json(res, 200, { ok: true });
     } catch(e) { return json(res, 200, { ok: false, error: e.message }); }
   }
@@ -1968,7 +2089,21 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
   // ── SERVER-SIDE PRICE ALERTS ─────────────────────────────────────────────
   // GET /api/price-alerts — list all active alerts
   if (req.method === "GET" && url === "/api/price-alerts") {
-    return json(res, 200, { alerts: global._priceAlerts || [] });
+    try {
+      const r = await sb.select("price_alerts", { order: "created_at.desc" });
+      const alerts = (r.data || []).map(a => ({
+        id: a.id, sym: a.sym, price: a.price, dir: a.dir,
+        chatId: a.chat_id, triggered: a.triggered,
+        triggeredPrice: a.triggered_price, triggeredAt: a.triggered_at,
+        createdAt: a.created_at, source: a.source || "app"
+      }));
+      // Keep in-memory in sync
+      global._priceAlerts = alerts.filter(a => !a.triggered);
+      return json(res, 200, { alerts });
+    } catch(e) {
+      // Fallback to in-memory
+      return json(res, 200, { alerts: global._priceAlerts || [] });
+    }
   }
 
   // POST /api/price-alerts — add a new alert
@@ -1993,6 +2128,7 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
   // DELETE /api/price-alerts/:id — remove an alert
   if (req.method === "DELETE" && url.startsWith("/api/price-alerts/")) {
     const id = url.split("/").pop();
+    try { await sb.delete("price_alerts", { id: "eq." + id }); } catch(e) {}
     if (!global._priceAlerts) global._priceAlerts = [];
     global._priceAlerts = global._priceAlerts.filter(a => a.id !== id);
     return json(res, 200, { ok: true });
@@ -2000,6 +2136,7 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
 
   // POST /api/price-alerts/clear — clear all alerts
   if (req.method === "POST" && url === "/api/price-alerts/clear") {
+    try { await sb.delete("price_alerts", { triggered: "eq.false" }); } catch(e) {}
     global._priceAlerts = [];
     return json(res, 200, { ok: true });
   }
@@ -2194,6 +2331,14 @@ Respond ONLY with a valid JSON array of exactly ${rawSyms.length} objects, no ma
           source: "telegram",
         };
         global._priceAlerts.push(alert);
+        // Save to Supabase
+        try {
+          await sb.insert("price_alerts", {
+            id: alert.id, sym: alert.sym, price: alert.price, dir: alert.dir,
+            chat_id: alert.chatId, triggered: false,
+            created_at: alert.createdAt, source: "telegram"
+          });
+        } catch(e) { console.warn("[SB] Telegram alert save error:", e.message); }
         console.log("[TELEGRAM-BOT] Alert set:", sym, dir, price, "by chatId:", chatId.slice(0,4)+"***");
 
         const curLine = curPrice ? `\nCurrent price: $${curPrice.toFixed(dp)}` : "";
@@ -2249,6 +2394,9 @@ server.on("upgrade", (req, socket) => {
   if (req.url === "/ws") wsHandshake(req, socket);
   else socket.destroy();
 });
+
+// Load persisted data from Supabase before server starts
+loadPersistedState().catch(e => console.warn("[SB] Boot load failed:", e.message));
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`\n╔════════════════════════════════════════╗`);
@@ -2422,6 +2570,11 @@ server.listen(PORT, "0.0.0.0", () => {
         alert.triggeredAt = new Date().toISOString();
         alert.triggeredPrice = curPrice;
         console.log("[PRICE-ALERT] Triggered:", alert.sym, alert.dir, alert.price, "current:", curPrice);
+        // Persist trigger to Supabase (fire-and-forget, don't await inside forEach)
+        sb.update("price_alerts",
+          { triggered: true, triggered_price: curPrice, triggered_at: alert.triggeredAt },
+          { id: "eq." + alert.id }
+        ).catch(e => console.warn("[SB] update triggered error:", e.message));
 
         // Send Telegram
         // Always try latest chatId — env var survives restarts, global may not
