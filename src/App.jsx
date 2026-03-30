@@ -134,6 +134,8 @@ const GlobalStyles=({dark})=>(
     @keyframes spin{from{transform:rotate(0deg);}to{transform:rotate(360deg);}}
     @keyframes shimmer{0%{background-position:-200% center;}100%{background-position:200% center;}}
     .page{animation:fadeUp .2s ease both;}
+    .skeleton{background:linear-gradient(90deg,${T.bg} 25%,${T.border} 50%,${T.bg} 75%);background-size:200% 100%;animation:shimmer 1.4s infinite;border-radius:4px;}
+    @keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
     .tab-content{animation:fadeUp .18s ease both;}
     .trow{transition:background .12s;}
     @media(max-width:768px){
@@ -143,6 +145,7 @@ const GlobalStyles=({dark})=>(
       .mobile-grid-2{grid-template-columns:1fr 1fr!important;}
       .mobile-hide{display:none!important;}
       .mobile-full{width:100%!important;max-width:100%!important;}
+      .page{padding-bottom:72px!important;}
     }
     @media(min-width:769px){
       .bottom-nav{display:none!important;}
@@ -729,6 +732,25 @@ function TVModal({symbol, onClose}){
   );
 }
 
+
+// ── ERROR BOUNDARY ────────────────────────────────────────────────────────
+class ErrorBoundary extends React.Component {
+  constructor(props){ super(props); this.state={hasError:false,error:null}; }
+  static getDerivedStateFromError(e){ return {hasError:true,error:e}; }
+  componentDidCatch(e,info){ console.error("[TradeLedger] Tab error:",e,info); }
+  render(){
+    if(this.state.hasError) return (
+      <div style={{padding:32,textAlign:"center",color:T.textSub}}>
+        <div style={{fontSize:32,marginBottom:12,opacity:.3}}>⚠</div>
+        <div style={{fontSize:14,fontWeight:600,color:T.text,marginBottom:8}}>Something went wrong in this tab</div>
+        <div style={{fontSize:12,color:T.textDim,marginBottom:16,fontFamily:"'JetBrains Mono',monospace",maxWidth:400,margin:"0 auto 16px"}}>{this.state.error?.message||"Unknown error"}</div>
+        <button className="btn btn-primary" onClick={()=>this.setState({hasError:false,error:null})}>Try Again</button>
+      </div>
+    );
+    return this.props.children;
+  }
+}
+
 // ── WATCHLIST ─────────────────────────────────────────────────
 function WatchlistTab({watchlist,prices,pFlash,onAddSymbol,onRemoveSymbol,analyseSymbol,trades}){
   const [pickerOpen,setPickerOpen]=useState(false);
@@ -1257,10 +1279,12 @@ function AnalyticsTab({trades,stats,weeklyAI,genWeeklyAI}){
     </div>
   );
   const pnlColor=stats.totalProfit>=0?T.green:T.red;
+  const [btData,setBtData]=useState(null);
+  const [btLoading,setBtLoading]=useState(false);
   const hourMap={};
   trades.forEach(t=>{const h=mt5Hour(t.openTime);if(h!==null){if(!hourMap[h])hourMap[h]={hour:h,profit:0,trades:0};hourMap[h].profit+=t.profit;hourMap[h].trades++;}});
   const hourData=Array.from({length:24},(_,h)=>({hour:h,profit:+(hourMap[h]?.profit||0).toFixed(2),trades:hourMap[h]?.trades||0}));
-  const sections=[{k:"overview",l:"Overview"},{k:"deepstats",l:"Deep Stats"},{k:"drawdown",l:"Drawdown"},{k:"monthly",l:"Monthly"},{k:"ruin",l:"Risk of Ruin"},{k:"coach",l:"AI Coach"}];
+  const sections=[{k:"overview",l:"Overview"},{k:"deepstats",l:"Deep Stats"},{k:"drawdown",l:"Drawdown"},{k:"monthly",l:"Monthly"},{k:"ruin",l:"Risk of Ruin"},{k:"backtest",l:"Backtest"},{k:"coach",l:"AI Coach"}];
 
   return (
     <div className="page" style={{overflowY:"auto",height:"100%",paddingBottom:8}}>
@@ -1826,12 +1850,13 @@ function CalendarTab({trades,todayNews}){
             const dayEvents=weekEvents.filter(e=>{
               const evtDate=e.date||e.time||e.datetime||"";
               if(!evtDate)return false;
-              // Try UTC slice first (ForexFactory format)
-              const utcSlice=(evtDate||"").slice(0,10);
-              if(utcSlice===targetDay)return true;
-              // Try parsing as local
+              const s=(evtDate||"").slice(0,10);
+              // Direct UTC slice match (ForexFactory: "2026-03-31T08:30:00Z")
+              if(s===targetDay)return true;
+              // Local timezone match for edge cases
               try{return localDay(new Date(evtDate))===targetDay;}catch{return false;}
             });
+            // Always show events — if nothing found for selected day, show today's
             const eventsToShow=dayEvents.length>0?dayEvents:(targetDay===localDay()?todayNews:[]);
             if(!eventsToShow.length)return null;
             const grouped={high:eventsToShow.filter(e=>(e.impact||"").toLowerCase()==="high"),medium:eventsToShow.filter(e=>(e.impact||"").toLowerCase()==="medium"),low:eventsToShow.filter(e=>!["high","medium"].includes((e.impact||"").toLowerCase()))};
@@ -2397,14 +2422,40 @@ function JournalTab({trades}){
                           <svg viewBox={"0 0 "+W+" "+H} style={{width:"100%",height:H,display:"block",borderRadius:8}}>
                             <defs>
                               <linearGradient id="rg" x1="0" y1="0" x2="0" y2="1">
-                                <stop offset="0%" stopColor={lineColor} stopOpacity="0.3"/>
+                                <stop offset="0%" stopColor={lineColor} stopOpacity="0.25"/>
                                 <stop offset="100%" stopColor={lineColor} stopOpacity="0.02"/>
                               </linearGradient>
                             </defs>
                             <polygon points={"0,"+H+" "+areaPoints+" "+(W-pad)+","+H} fill="url(#rg)"/>
                             <polyline points={areaPoints} fill="none" stroke={lineColor} strokeWidth="1.5" strokeLinejoin="round"/>
-                            {/* Current price dot */}
-                            <circle cx={xp(closes.length-1)} cy={yp(closes[closes.length-1])} r="3.5" fill={lineColor} stroke={T.surface} strokeWidth="1.5"/>
+                            {/* Entry marker — find closest candle to trade date */}
+                            {(()=>{
+                              const tradeDate=selected.date;
+                              if(!tradeDate)return null;
+                              // Find candle closest to entry time
+                              let entryIdx=0;
+                              let minDiff=Infinity;
+                              replayData.forEach((c,i)=>{
+                                const diff=Math.abs(new Date(c.t).getTime()-new Date(tradeDate).getTime());
+                                if(diff<minDiff){minDiff=diff;entryIdx=i;}
+                              });
+                              const ex=xp(entryIdx), ey=yp(closes[entryIdx]);
+                              const exitIdx=closes.length-1;
+                              const exx=xp(exitIdx), exy=yp(closes[exitIdx]);
+                              const isWin=(selected.pnl||0)>0;
+                              return <>
+                                {/* Entry vertical line */}
+                                <line x1={ex} y1={pad} x2={ex} y2={H-pad} stroke={T.blue} strokeWidth="1" strokeDasharray="3,3" opacity="0.6"/>
+                                {/* Entry dot */}
+                                <circle cx={ex} cy={ey} r="5" fill={T.blue} stroke={T.surface} strokeWidth="1.5"/>
+                                <text x={ex+6} y={ey-5} fontSize="8" fill={T.blue} fontWeight="bold">ENTRY</text>
+                                {/* Exit dot */}
+                                <circle cx={exx} cy={exy} r="5" fill={isWin?T.green:T.red} stroke={T.surface} strokeWidth="1.5"/>
+                                <text x={exx-30} y={exy-5} fontSize="8" fill={isWin?T.green:T.red} fontWeight="bold">EXIT</text>
+                                {/* P&L area between entry and exit */}
+                                <line x1={exx} y1={pad} x2={exx} y2={H-pad} stroke={isWin?T.green:T.red} strokeWidth="1" strokeDasharray="3,3" opacity="0.6"/>
+                              </>;
+                            })()}
                             {/* Price labels */}
                             <text x={pad+2} y={yp(maxP)-4} fontSize="8" fill={T.textDim}>${maxP.toFixed(maxP>100?2:5)}</text>
                             <text x={pad+2} y={yp(minP)+12} fontSize="8" fill={T.textDim}>${minP.toFixed(minP>100?2:5)}</text>
@@ -3510,8 +3561,45 @@ function SetupTab({serverOk,trades,riskLimit,setRiskLimit,goals,setGoals,account
         <div><h1 style={{fontSize:20,fontWeight:700,letterSpacing:"-0.5px"}}>Setup</h1><p style={{fontSize:12,color:T.textSub,marginTop:1}}>Configure your MT5 connection and preferences</p></div>
         <div style={{fontSize:10,color:T.textDim,textAlign:"right",fontFamily:"'JetBrains Mono',monospace"}}>
           <div style={{marginBottom:2}}>TradeLedger v2.0</div>
-          <div style={{color:T.textDim}}>{trades.length} trades · {new Date().toLocaleDateString("en-US",{month:"short",day:"numeric",year:"numeric"})}</div>
+          <div style={{color:T.textDim}}>{trades.length} trades · {localDay()}</div>
         </div>
+      </div>
+
+      {/* Weekly email report */}
+      <div className="card" style={{padding:"18px 20px",marginBottom:12,background:"linear-gradient(135deg,rgba(79,128,255,.04),rgba(0,196,140,.04))"}}>
+        <div style={{fontSize:13,fontWeight:700,marginBottom:4}}>Weekly Performance Email</div>
+        <div style={{fontSize:12,color:T.textSub,marginBottom:14,lineHeight:1.7}}>
+          Get a summary email every Monday with your weekly P&L, win rate, best/worst trade.<br/>
+          Requires a free <strong>Resend</strong> API key — add <code style={{background:T.bg,padding:"1px 5px",borderRadius:4}}>RESEND_API_KEY</code> to Railway Variables.
+        </div>
+        {(()=>{
+          const [emailInput,setEmailInput]=useState(()=>{try{return localStorage.getItem("tl_report_email")||"";}catch{return "";}});
+          const [emailSending,setEmailSending]=useState(false);
+          const [emailStatus,setEmailStatus]=useState(null);
+          return (
+            <div style={{display:"flex",gap:8,alignItems:"flex-end",maxWidth:480}}>
+              <div style={{flex:1}}>
+                <div style={{fontSize:10,color:T.textDim,marginBottom:4,fontWeight:600,textTransform:"uppercase",letterSpacing:"0.04em"}}>Your Email Address</div>
+                <input className="input" type="email" placeholder="you@example.com" value={emailInput}
+                  onChange={e=>{setEmailInput(e.target.value);try{localStorage.setItem("tl_report_email",e.target.value);}catch{}}}
+                  style={{fontSize:12}}/>
+              </div>
+              <button className="btn btn-primary" style={{fontSize:11,whiteSpace:"nowrap"}} disabled={!emailInput||emailSending}
+                onClick={async()=>{
+                  setEmailSending(true);setEmailStatus(null);
+                  try{
+                    const r=await fetch(SERVER+"/api/send-weekly-report?email="+encodeURIComponent(emailInput));
+                    const d=await r.json();
+                    setEmailStatus(d.preview?"Preview mode — add RESEND_API_KEY to Railway to send real emails":d.ok?"Email sent! Check your inbox":d.error||"Failed");
+                  }catch(e){setEmailStatus(e.message);}
+                  setEmailSending(false);
+                }}>
+                {emailSending?"Sending...":"Send Test Report"}
+              </button>
+            </div>
+          );
+        })()}
+        {null}
       </div>
       {/* Health strip */}
       <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:14}}>
@@ -4126,14 +4214,14 @@ export default function TradeLedger(){
 
           {/* Page — key fixes: overflowY:auto on content div, min-height:0 on flex chain */}
           <div style={{flex:1,overflowY:"auto",padding:"14px 16px 20px",paddingBottom:"calc(20px + env(safe-area-inset-bottom,0px))",minHeight:0}}>
-            {tab==="dashboard"&&<DashboardTab trades={trades} stats={stats} serverOk={serverOk} lastSync={lastSync}/>}
-            {tab==="watchlist"&&<WatchlistTab watchlist={watchlist} prices={prices} pFlash={pFlash} onAddSymbol={onAddSymbol} onRemoveSymbol={onRemoveSymbol} analyseSymbol={analyseSymbol} trades={trades}/>}
-            {tab==="analytics"&&<AnalyticsTab trades={trades} stats={stats} weeklyAI={weeklyAI} genWeeklyAI={genWeeklyAI}/>}
-            {tab==="calendar"&&<CalendarTab trades={trades} todayNews={todayNews}/>}
-            {tab==="news"&&<NewsTab savedNews={savedNews} setSavedNews={setSavedNews} fetchNews={fetchNews} newsLd={newsLd} openArticle={openArticle} searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchResults={searchResults} searchLd={searchLd} searchErr={searchErr} fetchMarketSearch={fetchMarketSearch}/>}
-            {tab==="crypto"&&<CryptoTab prices={prices} pFlash={pFlash} trades={trades} onAddSymbol={onAddSymbol}/>}
-            {tab==="journal"&&<JournalTab trades={trades}/>}
-            {tab==="setup"&&<SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit} goals={goals} setGoals={setGoals} accounts={accounts} setAccounts={setAccounts} activeAccount={activeAccount} setActiveAccount={setActiveAccount} prices={prices}/>}
+            {tab==="dashboard"&&<ErrorBoundary><DashboardTab trades={trades} stats={stats} serverOk={serverOk} lastSync={lastSync}/>}
+            {tab==="watchlist"&&<ErrorBoundary><WatchlistTab watchlist={watchlist} prices={prices} pFlash={pFlash} onAddSymbol={onAddSymbol} onRemoveSymbol={onRemoveSymbol} analyseSymbol={analyseSymbol} trades={trades}/>}
+            {tab==="analytics"&&<ErrorBoundary><AnalyticsTab trades={trades} stats={stats} weeklyAI={weeklyAI} genWeeklyAI={genWeeklyAI}/>}
+            {tab==="calendar"&&<ErrorBoundary><CalendarTab trades={trades} todayNews={todayNews}/>}
+            {tab==="news"&&<ErrorBoundary><NewsTab savedNews={savedNews} setSavedNews={setSavedNews} fetchNews={fetchNews} newsLd={newsLd} openArticle={openArticle} searchQuery={searchQuery} setSearchQuery={setSearchQuery} searchResults={searchResults} searchLd={searchLd} searchErr={searchErr} fetchMarketSearch={fetchMarketSearch}/>}
+            {tab==="crypto"&&<ErrorBoundary><CryptoTab prices={prices} pFlash={pFlash} trades={trades} onAddSymbol={onAddSymbol}/>}
+            {tab==="journal"&&<ErrorBoundary><JournalTab trades={trades}/>}
+            {tab==="setup"&&<ErrorBoundary><SetupTab serverOk={serverOk} trades={trades} riskLimit={riskLimit} setRiskLimit={setRiskLimit} goals={goals} setGoals={setGoals} accounts={accounts} setAccounts={setAccounts} activeAccount={activeAccount} setActiveAccount={setActiveAccount} prices={prices}/>}
           </div>
         </div>
       </div>
