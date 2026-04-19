@@ -1,7 +1,7 @@
 import { useState, useCallback, useMemo, useEffect, useRef } from "react";
 import { AreaChart, Area, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
 
-const SERVER = "https://tradeledger-server.YOUR-SUBDOMAIN.workers.dev"; // ← replace with your Cloudflare Worker URL
+const SERVER = "tradeledger-server.trivedimeghal09.workers.dev"; // ← replace with your Cloudflare Worker URL
 const WS_URL  = ""; // WebSocket not needed — Cloudflare Worker uses polling
 const DEFAULT_WL = ["EURUSD","GBPUSD","USDJPY","XAUUSD","GBPJPY","USDCHF","AUDUSD","BTCUSD"];
 
