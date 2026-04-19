@@ -557,6 +557,43 @@ export default {
     }
 
     // ── 404 ───────────────────────────────────────────────────────────────────
+    // ── GET / — Status homepage ──────────────────────────────────────────────
+    if (method === "GET" && path === "/") {
+      const trades = await getTrades(env);
+      return new Response(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>TradeLedger API</title>
+            <style>
+              body { font-family: monospace; background: #131722; color: #26a69a; padding: 40px; }
+              h1 { color: #d1d4dc; font-size: 20px; }
+              .ok { color: #26a69a; } .dim { color: #787b86; font-size: 13px; }
+              ul { margin: 20px 0; padding: 0; list-style: none; }
+              li { padding: 6px 0; border-bottom: 1px solid #2a2e39; }
+            </style>
+          </head>
+          <body>
+            <h1>⚡ TradeLedger API — Cloudflare Worker</h1>
+            <p class="ok">● ONLINE</p>
+            <p class="dim">${new Date().toISOString()} · ${trades.length} trades stored</p>
+            <ul>
+              <li><span class="dim">GET</span>  /api/status</li>
+              <li><span class="dim">GET</span>  /api/trades</li>
+              <li><span class="dim">POST</span> /api/trades</li>
+              <li><span class="dim">GET</span>  /api/quote?symbols=EURUSD,XAUUSD</li>
+              <li><span class="dim">GET</span>  /api/news</li>
+              <li><span class="dim">GET</span>  /api/calendar?date=YYYY-MM-DD</li>
+              <li><span class="dim">GET</span>  /api/week-events</li>
+            </ul>
+          </body>
+        </html>
+      `, {
+        status: 200,
+        headers: { ...CORS, "Content-Type": "text/html" },
+      });
+    }
+
     return json({ error: "Not found", path }, 404);
   },
 };
