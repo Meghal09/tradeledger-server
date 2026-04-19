@@ -562,35 +562,43 @@ export default {
       const trades = await getTrades(env);
       return new Response(`
         <!DOCTYPE html>
-        <html>
+        <html lang="en">
           <head>
+            <meta charset="UTF-8" />
             <title>TradeLedger API</title>
             <style>
-              body { font-family: monospace; background: #131722; color: #26a69a; padding: 40px; }
-              h1 { color: #d1d4dc; font-size: 20px; }
-              .ok { color: #26a69a; } .dim { color: #787b86; font-size: 13px; }
-              ul { margin: 20px 0; padding: 0; list-style: none; }
-              li { padding: 6px 0; border-bottom: 1px solid #2a2e39; }
+              body { font-family: monospace; background: #131722; color: #26a69a; padding: 40px; margin: 0; }
+              h1 { color: #d1d4dc; font-size: 20px; margin-bottom: 8px; }
+              .ok { color: #26a69a; margin: 4px 0; }
+              .dim { color: #787b86; font-size: 13px; margin: 4px 0; }
+              table { margin-top: 24px; border-collapse: collapse; }
+              tr { border-bottom: 1px solid #2a2e39; }
+              td { padding: 8px 16px 8px 0; font-size: 13px; }
+              .method { color: #2962ff; width: 50px; }
+              .path { color: #d1d4dc; }
             </style>
           </head>
           <body>
-            <h1>⚡ TradeLedger API — Cloudflare Worker</h1>
-            <p class="ok">● ONLINE</p>
-            <p class="dim">${new Date().toISOString()} · ${trades.length} trades stored</p>
-            <ul>
-              <li><span class="dim">GET</span>  /api/status</li>
-              <li><span class="dim">GET</span>  /api/trades</li>
-              <li><span class="dim">POST</span> /api/trades</li>
-              <li><span class="dim">GET</span>  /api/quote?symbols=EURUSD,XAUUSD</li>
-              <li><span class="dim">GET</span>  /api/news</li>
-              <li><span class="dim">GET</span>  /api/calendar?date=YYYY-MM-DD</li>
-              <li><span class="dim">GET</span>  /api/week-events</li>
-            </ul>
+            <h1>TradeLedger API - Cloudflare Worker</h1>
+            <p class="ok">ONLINE</p>
+            <p class="dim">\${new Date().toISOString()} &nbsp;|&nbsp; \${trades.length} trades stored</p>
+            <table>
+              <tr><td class="method">GET</td><td class="path">/api/status</td></tr>
+              <tr><td class="method">GET</td><td class="path">/api/trades</td></tr>
+              <tr><td class="method">POST</td><td class="path">/api/trades</td></tr>
+              <tr><td class="method">POST</td><td class="path">/api/trades/bulk</td></tr>
+              <tr><td class="method">DELETE</td><td class="path">/api/trades</td></tr>
+              <tr><td class="method">GET</td><td class="path">/api/quote?symbols=EURUSD,XAUUSD</td></tr>
+              <tr><td class="method">GET</td><td class="path">/api/news</td></tr>
+              <tr><td class="method">GET</td><td class="path">/api/calendar?date=YYYY-MM-DD</td></tr>
+              <tr><td class="method">GET</td><td class="path">/api/week-events</td></tr>
+              <tr><td class="method">GET</td><td class="path">/api/marketsearch?q=gold</td></tr>
+            </table>
           </body>
         </html>
       `, {
         status: 200,
-        headers: { ...CORS, "Content-Type": "text/html" },
+        headers: { ...CORS, "Content-Type": "text/html; charset=utf-8" },
       });
     }
 
