@@ -193,6 +193,7 @@ function KPI({label,value,sub,color="#26a69a",size=24,th}) {
       {sub&&<div style={{fontSize:10,color:dim,marginTop:4}}>{sub}</div>}
     </div>
   );
+}
 
 /* ── month grid ── */
 function CalMonthGrid({month,selected,onSelect}) {
