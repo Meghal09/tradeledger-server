@@ -134,7 +134,7 @@ function exportTradesToCSV(trades) {
   a.href = url; a.download = "TradeLedger_"+new Date().toISOString().slice(0,10)+".csv";
   a.click(); URL.revokeObjectURL(url);
 }
-const RAILWAY_SERVER = "https://tradeledger-server-production.up.railway.app";
+// Railway removed — using Cloudflare Worker (SERVER above)
 const PRICE_CACHE_KEY = "tl_price_cache";
 const PRICE_CACHE_TTL = 5 * 60 * 1000; // 5min max stale in localStorage
 
@@ -162,7 +162,7 @@ async function fetchPriceBatch(symbols, { onCachedHit } = {}) {
 
   // 2. Always fetch fresh in background
   try {
-    const r = await fetch(RAILWAY_SERVER + "/api/quote?symbols=" + symbols.join(","), {signal: AbortSignal.timeout(20000)});
+    const r = await fetch(SERVER + "/api/quote?symbols=" + symbols.join(","), {signal: AbortSignal.timeout(20000)});
     if (!r.ok) return cached || {};
     const data = await r.json();
     const quotes = data.quotes || {};
@@ -3731,7 +3731,7 @@ export default function TradeLedger() {
                     <div style={{fontSize:16,color:"#3d8eff",fontFamily:"'IBM Plex Sans',sans-serif",letterSpacing:2,fontWeight:600}}>{appToken||"TL-S7PDZ3UV"}</div>
                   </div>
                   <div style={{fontSize:12,color:TH.textSub,fontFamily:"'IBM Plex Sans',sans-serif",lineHeight:1.8}}>
-                    <div>Server: <span style={{color:TH.textSub}}>tradeledger-server-production.up.railway.app</span></div>
+                    <div>Server: <span style={{color:TH.textSub}}>YOUR-WORKER.workers.dev</span></div>
                     <div>Trades: <span style={{color:TH.textSub}}>{trades.length} synced</span></div>
                     {lastSync&&<div>Last sync: <span style={{color:TH.textSub}}>{lastSync}</span></div>}
                   </div>
