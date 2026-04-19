@@ -1927,7 +1927,7 @@ export default function TradeLedger() {
         <button onClick={fetchAll} style={{marginLeft:"auto",background:"rgba(248,113,113,0.1)",border:"1px solid #ef9a9a",borderRadius:6,padding:"4px 14px",color:"#ef5350",fontSize:11,cursor:"pointer",fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600}}>RETRY</button>
       </div>}
 
-      <div style={{display:"flex",minHeight:"calc(100vh - 36px)",background:TH.bg,transition:"background 0.3s ease",background:TH.bg}}>
+      <div style={{display:"flex",minHeight:"calc(100vh - 36px)",background:TH.bg,transition:"background 0.3s ease"}}>
 
         {/* overlay */}
         {sideOpen&&<div onClick={()=>setSideOpen(false)} style={{position:"fixed",inset:0,background:"rgba(0,0,0,0.45)",zIndex:49}}/>}
@@ -2114,7 +2114,7 @@ export default function TradeLedger() {
               {/* Header */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:20}}>
                 <div>
-                  <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:500,fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600,marginBottom:4}}>/ Home</div>
+                  <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:600,fontFamily:"'IBM Plex Sans',sans-serif",marginBottom:4}}>/ Home</div>
                   <h1 style={{fontSize:34,fontFamily:"'IBM Plex Sans',sans-serif",letterSpacing:-1,margin:0,color:TH.text,fontWeight:900,lineHeight:1}}>WATCHLIST</h1>
                 </div>
                 <div style={{display:"flex",gap:8}}>
@@ -2301,7 +2301,7 @@ export default function TradeLedger() {
               {/* ── Compact header ── */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
                 <div>
-                  <div style={{fontSize:10,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:500,fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600}}>Overview</div>
+                  <div style={{fontSize:10,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:600,fontFamily:"'IBM Plex Sans',sans-serif"}}>Overview</div>
                   <h1 style={{fontSize:26,fontFamily:"'IBM Plex Sans',sans-serif",letterSpacing:-1,margin:0,color:TH.text,fontWeight:900,lineHeight:1}}>Dashboard</h1>
                 </div>
                 {trades.length>0&&(
@@ -2513,7 +2513,7 @@ export default function TradeLedger() {
               {/* Section divider */}
               <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:14}}>
                 <div style={{height:1,flex:1,background:TH.border}}/>
-                <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:500,fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600}}>Deep Dive Analytics</div>
+                <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:600,fontFamily:"'IBM Plex Sans',sans-serif"}}>Deep Dive Analytics</div>
                 <div style={{height:1,flex:1,background:TH.border}}/>
               </div>
 
@@ -3202,7 +3202,7 @@ export default function TradeLedger() {
               {/* ── Top: calendar header + nav ── */}
               <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-end",marginBottom:14}}>
                 <div>
-                  <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:500,fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600,marginBottom:4}}>Calendar & Journal</div>
+                  <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:600,fontFamily:"'IBM Plex Sans',sans-serif",marginBottom:4}}>Calendar & Journal</div>
                   <div style={{fontSize:13,fontWeight:600,color:isDark?"#d1d4dc":"#131722"}}>Calendar & Journal</div>
                 </div>
                 <div style={{display:"flex",gap:6,alignItems:"center"}}>
@@ -3451,7 +3451,7 @@ export default function TradeLedger() {
               {/* ── Header ── */}
               <div style={{marginBottom:20,display:"flex",justifyContent:"space-between",alignItems:"flex-end"}}>
                 <div>
-                  <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:500,fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600}}>Archive</div>
+                  <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:600,fontFamily:"'IBM Plex Sans',sans-serif"}}>Archive</div>
                   <div style={{fontSize:13,fontWeight:600,color:isDark?"#d1d4dc":"#131722"}}>Market News</div>
                 </div>
                 <div style={{display:"flex",gap:8,alignItems:"center"}}>
@@ -3712,7 +3712,7 @@ export default function TradeLedger() {
           {tab==="setup"&&(
             <div style={{animation:"slideIn 0.3s ease"}}>
               <div style={{marginBottom:14}}>
-                <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:500,fontFamily:"'IBM Plex Sans',sans-serif",fontWeight:600,marginBottom:4}}>Configuration</div>
+                <div style={{fontSize:11,color:isDark?"#787b86":"#9598a1",textTransform:"uppercase",letterSpacing:0.4,fontWeight:600,fontFamily:"'IBM Plex Sans',sans-serif",marginBottom:4}}>Configuration</div>
                   <div style={{fontSize:13,fontWeight:600,color:isDark?"#d1d4dc":"#131722"}}>EA Setup</div>
               </div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
