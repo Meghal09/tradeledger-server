@@ -1,7 +1,7 @@
 name = "tradeledger-server"
 main = "worker.js"
 compatibility_date = "2026-04-19"
-compatibility_flags = ["nodejs_compat"]
+workers_dev = true
 
 [[kv_namespaces]]
 binding = "TRADELEDGER_KV"
